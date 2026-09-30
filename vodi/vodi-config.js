@@ -116,6 +116,8 @@ function addGateway(fields = {}) {
         railwayAccountId: fields.railwayAccountId || '',
         domain: fields.domain || '',
         source: fields.source || '',
+        // Which panel runs there ('vodi' | 'rvg'); rows from before RVG have none and are VodiWalker.
+        panel: fields.panel || 'vodi',
         createdAt: Date.now(),
     };
     cfg.gateways.push(gw);

@@ -16,7 +16,13 @@ const broker = require('./gt-broker');
 const accounts = require('./gt-accounts');
 const allocator = require('./gt-allocator');
 const quota = require('./gt-quota');
-const { buildWorkflowYaml, USABLE_SESSION_MINUTES } = require('./gt-workflow-template');
+const sessionCrypto = require('./gt-session-crypto');
+const brokerDeploy = require('./gt-broker-deploy');
+const slots = require('./gt-slots');
+const {
+    buildWorkflowYaml, USABLE_SESSION_MINUTES,
+    buildWorkflowYamlV2, agentFiles, WORKFLOW_V2_FILENAME, WORKFLOW_V2_PATH,
+} = require('./gt-workflow-template');
 
 const SECRET_NAME = 'MLMVPN_TS_AUTHKEY';
 const POLL_INTERVAL_MS = 5000;
@@ -36,7 +42,8 @@ function activeSession() {
 /** Ids of accounts that currently own a live session — ranked last, never excluded. */
 function busyAccountIds() {
     return store.getSessions()
-        .filter(s => ['READY', 'ACTIVE', 'EXPIRING_SOON'].includes(s.status) && s.accountId)
+        // A standby session (the next one, made ready before this one ends) is busy too.
+        .filter(s => ['READY', 'ACTIVE', 'EXPIRING_SOON', 'STANDBY'].includes(s.status) && s.accountId)
         .map(s => s.accountId);
 }
 
@@ -58,9 +65,16 @@ function tokenForSession(session) {
     return all.length === 1 ? accounts.token(all[0].id) : '';
 }
 
-async function createSession({ onLog, onState } = {}) {
+/**
+ * @param standby  v2 only: the next session, made ready while the current one still runs
+ *                 (routes.js › MAKE-BEFORE-BREAK). It ends in STANDBY, not READY, so
+ *                 activeSession() keeps returning the one in use until the swap.
+ */
+async function createSession({ onLog, onState, dataPlane, standby = false } = {}) {
     const log = (msg) => { try { onLog && onLog(msg); } catch (e) {} };
     const state = (s, session) => { try { onState && onState(s, session); } catch (e) {} };
+    const plane = dataPlane || store.getDataPlane();
+    const runner = plane === 'v2' ? runOnceV2 : runOnce;
 
     const tried = [];
     let lastErr = null;
@@ -83,7 +97,7 @@ async function createSession({ onLog, onState } = {}) {
         if (attempt > 0) log(`تلاش با حساب بعدی (${label})…`);
 
         try {
-            const session = await runOnce({ log, state, account });
+            const session = await runner({ log, state, account, standby });
             accounts.markHealthy(account.id, { lastUsedAt: Date.now() });
             accounts.recordUsage(account.id, quota.currentCycle(), { sessionsDelta: 1 });
             return session;
@@ -149,7 +163,8 @@ function accountFailureLine(label, health) {
 function friendlyError(e) {
     const msg = (e && e.message) || '';
     if (e && (e.code === 'BROKER_NOT_DEPLOYED' || e.code === 'BROKER_UNAVAILABLE'
-        || e.code === 'ACL_TAG_NOT_PERMITTED')) return msg;
+        || e.code === 'ACL_TAG_NOT_PERMITTED' || e.code === 'BROKER_NEEDS_UPDATE'
+        || e.code === 'QT_UNAVAILABLE' || e.code === 'SESSION_TIMEOUT')) return msg;
     // The pool ran out of places to try. That message already names the real reason
     // (all spent / all need re-auth / all cooling down), so do not bury it under a generic one.
     if (e && ['NO_ACCOUNTS', 'ALL_EXHAUSTED', 'ALL_AUTH_REQUIRED', 'ALL_COOLING_DOWN', 'NONE_AVAILABLE'].includes(e.code)) return msg;
@@ -319,6 +334,195 @@ async function awaitSession({ log, state, repo, session, runId, token, clientKey
     return updated;
 }
 
+// ── v2 ─────────────────────────────────────────────────────────────────────────────────
+//
+// No Tailscale key and no repository secret. The runner generates its own credentials and
+// publishes them SEALED to a one-time key whose public half is a dispatch input (see
+// gt-session-crypto.js for why a repo secret would race between back-to-back sessions). The
+// sealed file stays in the private repo for the session's life — it is ciphertext, and it is
+// how the runner tells us about a quick tunnel it had to replace (refreshTransport).
+
+/**
+ * The exit countries the user chose (gt-config › exit), as the runner's `exits` input: `JP` or
+ * `JP:psiphon`, comma-separated — so the runner starts them at boot instead of after the client
+ * asks (measured: a VPN Gate exit asked for after connect took 84 s, most of it installing OpenVPN).
+ */
+function exitsInput() {
+    try {
+        const p = store.getExitPrefs();
+        const out = [];
+        const add = (cc, provider) => { const v = provider ? `${cc}:${provider}` : cc; if (cc && !out.includes(v)) out.push(v); };
+        add(p.country, p.provider);
+        for (const r of p.rules) add(r.country, r.provider);
+        return out.slice(0, 6).join(',');
+    } catch (e) { return ''; }
+}
+
+async function runOnceV2({ log, state, account, standby = false }) {
+    const token = accounts.token(account.id);
+    if (!token) {
+        throw Object.assign(new Error('توکن این حساب گیت‌هاب خوانده نشد.'), { status: 401 });
+    }
+
+    // The client reaches the runner only through the user's own Worker — *.trycloudflare.com
+    // is blocked from Iran — so a session without a Worker that has the passthrough is one
+    // nobody can use. Checked BEFORE a runner (and an allowance) is spent on it.
+    const bs = brokerDeploy.status();
+    if (!bs.deployed) {
+        throw Object.assign(new Error('سرویس شبکهٔ امن (Worker روی حساب کلادفلر شما) هنوز راه‌اندازی نشده است.'), { code: 'BROKER_NOT_DEPLOYED' });
+    }
+    if (bs.needsRedeploy) {
+        throw Object.assign(new Error('سرویس شبکهٔ امن باید یک‌بار به‌روز شود تا مسیر تونل جدید را داشته باشد. «به‌روزرسانی» را بزنید — نشست فعلی دست نمی‌خورد.'), { code: 'BROKER_NEEDS_UPDATE' });
+    }
+
+    state('SETTING_UP');
+    log(`در حال بررسی دسترسی گیت‌هاب${account.login ? ` (@${account.login})` : ''}…`);
+    const repo = await github.ensureRepo(token);
+    accounts.update(account.id, { repository: repo.fullName, defaultBranch: repo.defaultBranch });
+    store.setRepo(repo);
+
+    let changed = (await github.ensureFile(token, repo.fullName, WORKFLOW_V2_PATH, buildWorkflowYamlV2(), { what: 'tunnel workflow' })).changed;
+    for (const [file, content] of Object.entries(agentFiles())) {
+        changed = (await github.ensureFile(token, repo.fullName, file, content, { what: 'tunnel agent' })).changed || changed;
+    }
+    accounts.update(account.id, { workflowSyncedAt: Date.now() });
+    log(changed ? 'زیرساخت ابری پیکربندی شد.' : 'زیرساخت ابری از قبل به‌روز است.');
+
+    const kp = sessionCrypto.newKeyPair();
+    const { protect } = require('./gt-crypto');
+    const session = store.addSession({
+        repository: repo.fullName, status: 'SETTING_UP',
+        accountId: account.id, accountLogin: account.login, dataPlane: 'v2',
+    });
+    // THE STABLE TUNNEL (gt-slots.js): a slot no other runner holds, and its connector token on
+    // this account's repo. Anything missing only means this session goes without it — the quick
+    // tunnels carry it exactly as before.
+    let slot = '';
+    try {
+        slot = slots.pickSlot(store.getSessions().filter((s) => s.id !== session.id));
+        if (slot && !(await slots.ensureSecrets(account.id, { onLog: log }))) slot = '';
+    } catch (e) {
+        slot = '';
+        log(`تونل پایدار برای این نشست آماده نشد (${String(e.message || e).slice(0, 100)}) — فقط تونل‌های موقت کلادفلر.`);
+    }
+    if (slot) slots.noteSlotUsed(slot);
+    store.updateSession(session.id, { v2: { sealKey: protect(JSON.stringify(kp.privateJwk)), slot } });
+    state('SETTING_UP', session);
+    allocator.renew(account.id);
+
+    state('STARTING', session);
+    log('در حال راه‌اندازی سرور ابری…');
+    const inputs = { session_id: session.id, client_pub: kp.publicKey, xray_version: require('./gt-core').xrayVersion(), slot, exits: exitsInput() };
+    // A workflow GitHub has only just been handed can answer 404/422 to a dispatch for a few
+    // seconds while it registers — measured on the first spike. Not a fault; wait it out.
+    let runId = null;
+    let lastErr = null;
+    for (let i = 0; i < 6 && !runId; i++) {
+        try {
+            runId = await github.dispatchWorkflow(token, repo.fullName, repo.defaultBranch, inputs, { workflowFile: WORKFLOW_V2_FILENAME });
+        } catch (e) {
+            lastErr = e;
+            if (!(e.status === 404 || e.status === 422)) break;
+            await sleep(5000);
+        }
+    }
+    if (!runId) {
+        store.updateSession(session.id, { status: 'FAILED', lastError: String((lastErr && lastErr.message) || 'dispatch failed').slice(0, 200) });
+        throw lastErr || new Error('dispatch failed');
+    }
+    store.updateSession(session.id, { workflowRunId: runId, status: 'STARTING' });
+
+    // From here a runner is spending the account's allowance: every failure cancels it.
+    try {
+        return await awaitSessionV2({ log, state, repo, session, runId, token, privateJwk: kp.privateJwk, standby });
+    } catch (e) {
+        try { await github.cancelRun(token, repo.fullName, runId); } catch (_) {}
+        try { await github.deleteSessionFile(token, repo.fullName, session.id); } catch (_) {}
+        throw e;
+    }
+}
+
+async function awaitSessionV2({ log, state, repo, session, runId, token, privateJwk, standby = false }) {
+    state('INSTALLING', session);
+    log('در حال آماده‌سازی تونل…');
+
+    const deadline = Date.now() + MAX_WAIT_MS;
+    let sealed = null;
+    let payload = null;
+    let sawInProgress = false;
+    let runStartedAt = null;
+    while (Date.now() < deadline) {
+        await sleep(POLL_INTERVAL_MS);
+        const run = await github.getRun(token, repo.fullName, runId);
+        if (run.run_started_at) runStartedAt = Date.parse(run.run_started_at);
+        if (run.status === 'in_progress') {
+            if (!sawInProgress) { sawInProgress = true; state('CONNECTING_NETWORK', session); log('سرور ابری روشن شد؛ در حال ساخت تونل‌ها…'); }
+            const s = await github.getSessionData(token, repo.fullName, session.id);
+            if (s) {
+                payload = sessionCrypto.open(privateJwk, s, session.id);
+                if (payload.phase === 'ready' || payload.phase === 'failed') { sealed = s; break; }
+            }
+        } else if (run.status === 'completed') {
+            const err = new Error(explainDeadRun(run, sawInProgress));
+            err.code = sawInProgress ? '' : 'RUN_DIED_EARLY';
+            store.updateSession(session.id, { status: 'FAILED', lastError: `workflow ${run.conclusion}` });
+            throw err;
+        }
+    }
+
+    if (!payload || payload.phase !== 'ready') {
+        const why = payload && Array.isArray(payload.errors) && payload.errors.length ? ` (${String(payload.errors[0]).slice(0, 120)})` : '';
+        store.updateSession(session.id, { status: 'FAILED', lastError: payload ? `runner: ${payload.phase}` : 'timed out waiting for tunnel' });
+        throw Object.assign(new Error(payload
+            ? `سرور ابری روشن شد ولی کلادفلر برایش تونل نساخت${why}. دوباره تلاش می‌شود.`
+            : 'مهلت آماده شدن نشست ابری تمام شد.'), { code: payload ? 'QT_UNAVAILABLE' : 'SESSION_TIMEOUT' });
+    }
+    // What the runner hands back ends up in a config and a URL path; checked before it is kept.
+    require('./gt-core').validateTransport(payload);
+
+    const anchor = runStartedAt || github.serverNow();
+    const expiresAt = anchor + (USABLE_SESSION_MINUTES * 60 * 1000);
+    const current = store.getSession(session.id) || session;
+    const updated = store.updateSession(session.id, {
+        status: standby ? 'STANDBY' : 'READY', expiresAt, runStartedAt: anchor, lastError: '',
+        v2: {
+            ...(current.v2 || {}),
+            sealed, rev: payload.rev || 1,
+            // Not secret, and what the panel shows: where this session's server is.
+            runner: { country: (payload.runner || {}).country || '', city: (payload.runner || {}).city || '', org: (payload.runner || {}).org || '' },
+            hosts: payload.hosts.length, xrayVersion: payload.xrayVersion || '',
+            // The runner's word on its stable tunnel: connected to Cloudflare, or not (then the
+            // quick tunnels alone carry the session).
+            slotReady: !!(current.v2 && current.v2.slot && payload.slot && payload.slot.name === current.v2.slot && payload.slot.ready),
+        },
+    });
+    state('READY', updated);
+    const where = updated.v2.runner.country ? ` — سرور در ${updated.v2.runner.country}` : '';
+    log(`نشست ابری آماده است${where}.`);
+    return updated;
+}
+
+/**
+ * Pick up a quick tunnel the runner had to replace. Its supervisor republishes the sealed file
+ * with a higher `rev`; reading it before a connect means a dead hostname never has to be
+ * discovered by timing out on it. Never fatal — the stored copy is used if GitHub is unreachable.
+ */
+async function refreshTransport(session) {
+    if (!session || session.dataPlane !== 'v2' || !session.v2 || !session.v2.sealKey) return session;
+    const token = tokenForSession(session);
+    if (!token || !session.repository) return session;
+    try {
+        const sealed = await github.getSessionData(token, session.repository, session.id);
+        if (!sealed) return session;
+        const payload = sessionCrypto.open(require('./gt-core').sealKeyFor(session), sealed, session.id);
+        if (payload.phase !== 'ready' || (payload.rev || 0) <= (session.v2.rev || 0)) return session;
+        require('./gt-core').validateTransport(payload);
+        return store.updateSession(session.id, { v2: { ...session.v2, sealed, rev: payload.rev, hosts: payload.hosts.length } }) || session;
+    } catch (e) {
+        return session;
+    }
+}
+
 /** Activate Again / Renew — reuses "existing tunnel active" guard from spec §14. */
 async function renewSession({ force = false, onLog, onState } = {}) {
     if (!force) {
@@ -379,7 +583,7 @@ async function reconcile(session, { force = false } = {}) {
 
     if (run.status === 'completed') {
         return store.updateSession(session.id, {
-            status: 'EXPIRED',
+            status: 'EXPIRED', endedAt: Date.now(),
             lastError: `cloud session ended (${run.conclusion || 'completed'})`,
         });
     }
@@ -428,11 +632,33 @@ async function endSession(session, onLog) {
             log('نشست ابری قبلی قابل لغو نبود چون حساب گیت‌هابِ سازنده‌اش دیگر متصل نیست.');
         }
     }
-    await broker.revokeSession(session.id);
-    store.updateSession(session.id, { status: 'EXPIRED' });
+    if (session.dataPlane === 'v2') {
+        // Ciphertext, but a finished session has no reason to leave anything in the repo.
+        if (token && session.repository) { try { await github.deleteSessionFile(token, session.repository, session.id); } catch (e) {} }
+    } else {
+        await broker.revokeSession(session.id);
+    }
+    // endedAt: its slot (gt-slots.js) stays taken until GitHub has really stopped the runner.
+    store.updateSession(session.id, { status: 'EXPIRED', endedAt: Date.now() });
+}
+
+/**
+ * Make a standby session the active one. The previous one leaves the active set FIRST (ENDING),
+ * so every activeSession() after this line — the reconnect included — sees the new session.
+ */
+function promoteStandby(next, prev) {
+    if (prev) store.updateSession(prev.id, { status: 'ENDING' });
+    return store.updateSession(next.id, { status: 'READY' });
+}
+
+/** Undo promoteStandby when the new session would not carry traffic: back on the old one. */
+function demoteStandby(next, prev) {
+    store.updateSession(next.id, { status: 'FAILED', lastError: 'cutover failed' });
+    if (prev) return store.updateSession(prev.id, { status: 'EXPIRING_SOON' });
+    return null;
 }
 
 module.exports = {
-    createSession, renewSession, activeSession, tick, reconcile,
-    endSession, tokenForSession, busyAccountIds,
+    createSession, renewSession, activeSession, tick, reconcile, promoteStandby, demoteStandby,
+    endSession, tokenForSession, busyAccountIds, refreshTransport,
 };

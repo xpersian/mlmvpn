@@ -62,6 +62,12 @@ function getJSON(p) {
     if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
       console.log('[console.error]', msg.params.args.map((a) => a.value || a.description).join(' '));
     }
+    // A native alert/confirm/prompt blocks the page until someone answers it — headless, nobody
+    // does, and every later step hangs. Say which one it was, and dismiss it.
+    if (msg.method === 'Page.javascriptDialogOpening') {
+      console.log('[dialog]', msg.params.type, String(msg.params.message || '').slice(0, 200));
+      send('Page.handleJavaScriptDialog', { accept: false });
+    }
   });
   const send = (method, params = {}) => new Promise((r) => {
     const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params }));

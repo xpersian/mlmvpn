@@ -154,10 +154,15 @@ t('remaining sessions are computed from the real allowance, never a hardcoded 20
     return small === 2 && none === 0 && unknowable === null;
 })());
 
-t('a Windows session is priced with the 2x multiplier', (() => {
+t('a session is priced by the runner it runs on: v2 ubuntu 1x, v1 Windows 2x, unknown as Windows', (() => {
     const { SESSION_LIFETIME_MINUTES } = require(`${GT}/gt-workflow-template`);
     return quota.OS_MULTIPLIER.WINDOWS === 2
-        && quota.SESSION_COST_MINUTES === SESSION_LIFETIME_MINUTES * 2;
+        // a new session is a v2 one, so ranking prices it at 1x
+        && quota.SESSION_COST_MINUTES === SESSION_LIFETIME_MINUTES * 1
+        && quota.runMultiplier({ path: '.github/workflows/mlmvpn-tunnel-v2.yml' }) === 1
+        && quota.runMultiplier({ path: '.github/workflows/mlmvpn-tunnel.yml' }) === 2
+        && quota.runMultiplier({ path: '.github/workflows/mlmvpn-spike.yml' }) === 1
+        && quota.runMultiplier({ path: '.github/workflows/something-else.yml' }) === 2;
 })());
 
 // ── allocation ──────────────────────────────────────────────────────────────────────

@@ -227,8 +227,14 @@ function classifyFailure(err) {
     // it walks the entire pool, fails identically on each, and leaves ten healthy accounts
     // marked broken over a fault that belongs to none of them.
     if (err && (err.code === 'BROKER_NOT_DEPLOYED' || err.code === 'BROKER_UNAVAILABLE'
-        || err.code === 'ACL_TAG_NOT_PERMITTED')) {
+        || err.code === 'ACL_TAG_NOT_PERMITTED' || err.code === 'BROKER_NEEDS_UPDATE')) {
         return { health: null, retryable: false, sameAccount: false };
+    }
+    // v2: the runner came up but Cloudflare did not give it a working quick tunnel (they are
+    // best-effort, and creation can be refused from shared datacenter addresses). Nothing to
+    // do with the account — another run, on any account, may well get one.
+    if (err && err.code === 'QT_UNAVAILABLE') {
+        return { health: null, retryable: true, sameAccount: false };
     }
     if (status === 404 || /repository|workflow|not found/.test(msg)) {
         return { health: accounts.HEALTH.REPO_ERROR, retryable: true, sameAccount: false };

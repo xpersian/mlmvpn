@@ -168,16 +168,10 @@
         tailscale: { icon: 'g-server', tint: 'gray', dev: 'Tailscale',
             sub: 'موتور تونل گیت‌هاب',
             desc: 'همان موتوری که تونل گیت‌هاب روی آن سوار است. فایل‌هایش در پوشهٔ پروفایل کاربر نگه داشته می‌شوند تا نسخهٔ پرتابل هم آن‌ها را از دست ندهد.' },
+        softether: { icon: 'g-gateway-art', art: true, tint: 'indigo', dev: 'SoftEther VPN Project',
+            sub: 'موتور گیت‌وی MLM — کلاینت رسمی سافت‌اتر',
+            desc: 'کلاینت رسمی سافت‌اتر، همراه برنامه. اگر روی سیستم سافت‌اتری نباشد، اولین اتصالِ «گیت‌وی MLM» خودش آن را به‌عنوان سرویس ویندوز نصب می‌کند. به‌روزرسانی مستقیم از انتشار رسمی خودِ سافت‌اتر گرفته می‌شود و فقط با امضای دیجیتال معتبرِ خودشان پذیرفته می‌شود؛ نصاب هرگز اجرا نمی‌شود و فایل‌ها از داخل همان فایلِ امضاشده بیرون کشیده می‌شوند. نسخهٔ تازه در اتصالِ بعدی جای قبلی را می‌گیرد. سافت‌اتری که خودتان نصب کرده باشید دست نمی‌خورد و همان استفاده می‌شود.' },
 
-        bpb: { icon: 'g-cloud', tint: 'orange', dev: 'bia-pain-bache',
-            sub: 'پنل وورکر روی حساب کلودفلر خودتان',
-            desc: 'پنل وورکر که روی حساب کلودفلر خودتان مستقر شده و کانفیگ می‌سازد. بروزرسانی فقط کد را عوض می‌کند: تنظیمات جاسازی‌شدهٔ پنل — شناسهٔ حساب، UUID، مسیر امن و آی‌پی پروکسی — بی‌کم‌وکاست منتقل می‌شوند و KV دست نمی‌خورد.' },
-        zeus: { icon: 'g-cloud', tint: 'indigo', dev: 'panel-zeus',
-            sub: 'پنل وورکر با پایگاه‌دادهٔ D1',
-            desc: 'پنل وورکر با پایگاه‌دادهٔ D1 که خودش مهاجرت می‌کند. بروزرسانی فقط کد وورکر را عوض می‌کند؛ دیتابیس کاربران و اتصال‌هایش سر جایشان می‌مانند.' },
-        edge: { icon: 'g-swap', tint: 'teal', dev: 'cmliu',
-            sub: 'پروکسی Edge روی حساب خودتان',
-            desc: 'وورکر edgetunnel روی حساب کلودفلر خودتان. نسخه‌اش تاریخ ساخت است، نه شماره.' },
         dns: { icon: 'g-globe', tint: 'blue', dev: 'MLM',
             sub: 'DNS اختصاصی — مکان‌یابی سرور',
             desc: 'وورکری که هر پرسش DNS را با محدودهٔ کشور دلخواه شما بازنویسی می‌کند تا سرور بازی یا CDN نزدیک‌ترین گزینه به آن منطقه را برگرداند.' },
@@ -191,7 +185,6 @@
             sub: 'سرویس کلید تونل گیت‌هاب',
             desc: 'تنها جایی که اعتبارنامهٔ شبکهٔ امن نگه داشته می‌شود؛ روی حساب خودتان، با امضای مخصوص همین نصب.' },
         'mlm-panel': { icon: 'g-server', tint: 'indigo', dev: 'MLM (اندروید)', sub: 'کانفیگ استدیو — مستقرشده از اندروید' },
-        nahan: { icon: 'g-shield', tint: 'purple', dev: 'MLM (اندروید)', sub: 'پنل نهان — مستقرشده از اندروید' },
         'vpngate-relay': { icon: 'g-swap', tint: 'gray', dev: 'MLM (اندروید)', sub: 'رلهٔ فهرست VPN Gate — مستقرشده از اندروید' },
         'sub-generator': { icon: 'g-layers', tint: 'teal', dev: 'MLM (اندروید)', sub: 'سازندهٔ لینک ساب — مستقرشده از اندروید' },
 
@@ -232,10 +225,173 @@
             } },
     };
 
+    // ── the nine panels of the Cloud window ─────────────────────────────────────
+    //
+    // Each is a product of its own (kind 'panel', store-manager.js › panelRows) AND the look of every
+    // deployed copy of it. Same two voices as above: `about` condenses what the developer's own
+    // README says their panel is, `inApp` is what THIS app does with it. Licences are the ones in the
+    // developer's repository on 2026-10-01; the pictures are their own GitHub avatars.
+    const gh = (who) => ['گیت‌هاب سازنده', 'https://github.com/' + who, 'ph-fill ph-github-logo'];
+    const repoLink = (repo) => ['مخزن این پروژه', 'https://github.com/' + repo, 'ph-fill ph-folder-open'];
+    const tg = (label, url) => [label, url, 'ph-fill ph-telegram-logo'];
+    Object.assign(LOOK, {
+        bpb: { img: 'assets/dev/bia-pain-bache.png', tint: 'blue', dev: 'bia-pain-bache',
+            sub: 'پنل VLESS، Trojan و وارپ روی حساب کلادفلر خودتان',
+            about: [
+                ['این پنل چیست', 'پنلی برای ساختن پروکسی رایگان و شخصی روی ورکر کلادفلر: کانفیگ‌های VLESS و Trojan، کانفیگ‌های وارپ (وایرگارد) و یک DoH خصوصی، برای کلاینت‌های همهٔ سیستم‌عامل‌ها. هدفش این است که اتصال حتی وقتی دامنه‌ها یا سرویس وارپ از طرف اپراتور بسته شده‌اند برقرار بماند.'],
+                ['چه چیزهایی دارد', 'وارپ پرو برای شرایط سخت، فرگمنت، قواعد مسیریابی (دور زدن ایران و چین و روسیه، بستن QUIC، تبلیغات، بدافزار و فیشینگ، و دور زدن تحریم)، پراکسی زنجیره‌ای برای ثابت کردن آی‌پی خروجی، لینک اشتراک برای هسته‌های Xray و Sing-box و Clash، پنل رمزدار، و تنظیم آی‌پی تمیز، ProxyIP، DNS، پورت‌ها و اندپوینت وارپ.'],
+                ['محدودیت‌هایی که خود سازنده نوشته', 'VLESS و Trojan روی ورکر UDP را درست منتقل نمی‌کنند، پس UDP به‌طور پیش‌فرض خاموش است (مثلاً تماس تصویری تلگرام). هر ورکر هم روزانه ۱۰۰ هزار درخواست دارد که به گفتهٔ سازنده برای دو سه کاربر کافی است؛ کانفیگ‌های وارپ این سقف را ندارند.'],
+            ],
+            inApp: [
+                ['از کجا نصب و بروز می‌شود', 'فایل worker.js از آخرین انتشار پایدار مخزن سازنده. کد دریافتی پیش از هر نصب یا بروزرسانی باید اثرانگشت خود BPB را داشته باشد، وگرنه کنار گذاشته می‌شود.'],
+                ['بروزرسانی چه چیزی را عوض می‌کند', 'فقط کد. تنظیماتی که BPB هنگام نصب داخل خود اسکریپت جاسازی می‌کند — شناسهٔ حساب، UUID، رمز Trojan، مسیر امن و آی‌پی پروکسی — از نسخهٔ نصب‌شده خوانده و بی‌کم‌وکاست روی کد تازه گذاشته می‌شود و KV دست نمی‌خورد. نسخه‌های ۴ و پایین‌تر رازهایی دارند که نسخهٔ ۵ نمی‌پذیرد؛ آن‌ها باید دوباره مستقر شوند، نه بروز.'],
+            ],
+            facts: [['مجوز', 'GPL-3.0'], ['داده‌ها', 'KV روی حساب خودتان']],
+            devBox: { name: 'bia-pain-bache', logo: 'assets/dev/bia-pain-bache.png',
+                line: 'سازندهٔ BPB Panel و BPB Wizard (ابزاری که همین پنل را در چند ثانیه روی ورکر یا Pages نصب می‌کند). کد، انتشارها و راهنمای نصب و تنظیمات در گیت‌هاب سازنده است.',
+                links: [repoLink('bia-pain-bache/BPB-Worker-Panel'), gh('bia-pain-bache'), ['راهنمای رسمی', 'https://bia-pain-bache.github.io/BPB-Worker-Panel/', 'ph-fill ph-book-open']] } },
+        edge: { img: 'assets/dev/cmliu.jpg', tint: 'green', dev: 'cmliu',
+            sub: 'تونل edgetunnel با پنل مدیریت، روی حساب خودتان',
+            about: [
+                ['این پنل چیست', 'edgetunnel تونلی روی ورکر یا Pages کلادفلر است که ترافیک را در لبهٔ شبکهٔ کلادفلر جابه‌جا می‌کند و یک پنل مدیریت دیداری دارد. راهنمای اصلی پروژه به زبان چینی است.'],
+                ['چه چیزهایی دارد', 'پروتکل‌های VLESS، Trojan و Shadowsocks؛ پنل مدیریت با تغییر زندهٔ تنظیمات، لاگ و آمار ترافیک؛ سازندهٔ خودکار اشتراک برای Clash و Sing-box و Surge؛ ProxyIP دلخواه، پراکسی زنجیره‌ای SOCKS5 و HTTP، و API برای آی‌پی‌های ترجیحی.'],
+            ],
+            inApp: [
+                ['از کجا نصب و بروز می‌شود', 'فایل _worker.js روی شاخهٔ اصلی مخزن سازنده، در آخرین commit. نسخهٔ این پنل تاریخ و ساعت ساخت است، نه شماره — و استور همان را مقایسه می‌کند.'],
+                ['بروزرسانی چه چیزی را عوض می‌کند', 'فقط کد؛ UUID، متغیرها، KV و تنظیمات سازگاری روی ورکر می‌مانند. نشانهٔ ترتیب بایت (BOM) اول فایل سازنده پیش از آپلود برداشته می‌شود.'],
+            ],
+            facts: [['مجوز', 'GPL-2.0'], ['داده‌ها', 'KV روی حساب خودتان']],
+            devBox: { name: 'cmliu', logo: 'assets/dev/cmliu.jpg',
+                line: 'سازندهٔ edgetunnel. راهنمای مصور نصب روی وبلاگ سازنده است و گروه تلگرامش محل پرسش و خبر نسخه‌های تازه.',
+                links: [repoLink('cmliu/edgetunnel'), gh('cmliu'), tg('گروه تلگرام', 'https://t.me/CMLiussss'), ['راهنمای نصب', 'https://cmliussss.com/p/edt2/', 'ph-fill ph-book-open']] } },
+        zeus: { img: 'assets/dev/panel-zeus.png', tint: 'indigo', dev: 'ZEUS PANEL',
+            sub: 'پنل مدیریت کاربر با دیتابیس D1، روی حساب خودتان',
+            about: [
+                ['این پنل چیست', 'پنل مدیریت کاربر روی ورکر کلادفلر با دیتابیس D1. کانفیگ‌های VLESS و Trojan روی WebSocket می‌سازد و برای هر کاربر سقف حجم، زمان، تعداد درخواست و دستگاه هم‌زمان نگه می‌دارد.'],
+                ['چه چیزهایی دارد', 'تا هشت پراکسی یا لوکیشن برای هر کاربر با جایگزینی خودکار پراکسی خراب، چرخش خودکار آی‌پی تمیز، فرگمنت TLS با پیش‌تنظیم هر اپراتور ایران، شبیه‌سازی اثرانگشت مرورگر، بستن محتوای بزرگسال و تبلیغات با DoH، صفحهٔ وضعیت و لینک اشتراک و QR برای هر کاربر، اسکنر آی‌پی تمیز داخل پنل، پشتیبان‌گیری کامل از دیتابیس، و ربات تلگرام برای نصب و مدیریت.'],
+                ['مجوز', 'اختصاصی: استفادهٔ شخصی و غیرتجاری آزاد است؛ فروش، تغییر و انتشار دوبارهٔ کد بدون اجازهٔ کتبی سازنده ممنوع است. برای همین این برنامه کد زئوس را دست‌نخورده و مستقیم از مخزن خود سازنده روی حساب شما می‌گذارد.'],
+            ],
+            inApp: [
+                ['از کجا نصب و بروز می‌شود', 'فایل Source.js روی شاخهٔ اصلی مخزن سازنده، در آخرین commit — دست‌نخورده، همان‌طور که سازنده منتشر کرده.'],
+                ['بروزرسانی چه چیزی را عوض می‌کند', 'فقط کد ورکر. پنل دیتابیس D1 خودش را مهاجرت می‌کند؛ کاربران، رمز پنل و اتصال‌ها سر جایشان می‌مانند و ورود برنامه به پنل هم مثل قبل کار می‌کند.'],
+            ],
+            facts: [['مجوز', 'اختصاصی — فقط استفادهٔ شخصی و غیرتجاری'], ['داده‌ها', 'دیتابیس D1 روی حساب خودتان']],
+            devBox: { name: 'ZEUS PANEL', logo: 'assets/dev/panel-zeus.png',
+                line: 'تیم سازندهٔ Zeus Panel. ربات تلگرامشان پنل را نصب و مدیریت می‌کند و خبر نسخه‌های تازه در جامعهٔ تلگرامشان است.',
+                links: [repoLink('panel-zeus/Z-E-U-S'), gh('panel-zeus'), tg('جامعهٔ تلگرام', 'https://t.me/PANEL_ZEUS'), ['ربات نصب', 'https://t.me/ZEUS_PANEL_BOT', 'ph-fill ph-robot']] } },
+        spider: { img: 'assets/dev/amirh00sain.jpg', tint: 'pink', dev: 'amirh00sain',
+            sub: 'ورکر اسپایدر — این برنامه پنل آن است',
+            about: [
+                ['این پروژه چیست', 'SpiderPanel یک پنل کنترل Xray با پایتون (FastAPI) است: کاربران، اشتراک و لینک و QR، نودها، اسکنر و ربات تلگرام فروش را یک‌جا مدیریت می‌کند و روی VPS یا Railway اجرا می‌شود.'],
+                ['ورکرِ آن', 'در مخزنش یک ورکر کلادفلر هم هست: VLESS روی WebSocket و TLS با یک مسیر ثابت برای هر کاربر، که مصرف و آی‌پی‌های هم‌زمان هر کاربر را در KV می‌شمارد و پنل با یک توکن مدیریتی آن را می‌راند.'],
+            ],
+            inApp: [
+                ['این برنامه پنل آن است', 'روی حساب کلادفلر شما فقط ورکر نصب می‌شود و نقش پنل را همین برنامه بازی می‌کند: از ردیف اسپایدر در پنجرهٔ «ابری» کاربر می‌سازید (حجم، روز، سقف آی‌پی)، لینک می‌گیرید و خروجی‌های SOCKS5 یا HTTP خودتان را ثبت می‌کنید.'],
+                ['از کجا نصب و بروز می‌شود', 'فایل worker/worker.js روی شاخهٔ اصلی مخزن سازنده، در آخرین commit. سه مقداری که هنگام نصب در کد جا می‌گیرد — توکن مدیریت، دامنهٔ پنل و دامنهٔ ورکر — از نسخهٔ نصب‌شده به کد تازه منتقل می‌شود، پس کاربران و خروجی‌ها می‌مانند.'],
+            ],
+            facts: [['مجوز', 'سازنده مجوزی منتشر نکرده است'], ['داده‌ها', 'KV روی حساب خودتان']],
+            devBox: { name: 'amirh00sain', logo: 'assets/dev/amirh00sain.jpg',
+                line: 'سازندهٔ SpiderPanel. کد پنل، ورکر و نصب یک‌دستوری روی VPS در گیت‌هاب سازنده است.',
+                links: [repoLink('amirh00sain/SpiderPanel'), gh('amirh00sain')] } },
+        netra: { img: 'assets/dev/netrair.png', tint: 'purple', dev: 'Netra',
+            sub: 'پنل VLESS و Trojan از خانوادهٔ BPB، روی حساب خودتان',
+            about: [
+                ['این پنل چیست', 'پنل پروکسی VLESS و Trojan رایگان و خودمیزبان که کاملاً روی ورکر کلادفلر اجرا می‌شود — بدون VPS و بدون هزینهٔ ماهانه. از خانوادهٔ BPB است.'],
+                ['چه چیزهایی دارد', 'وارپ و وارپ پرو، لینک اشتراک برای کلاینت‌های Xray و Sing-box و Clash و وایرگارد، تنظیمات فرگمنت و نویز برای شبکه‌های سخت‌گیر، و پنل وبی که همه‌چیز — UUID، رمز، پورت‌ها، DNS و قواعد مسیریابی — را بدون دست زدن به کد عوض می‌کند. ربات تلگرامِ نصب هم دارد.'],
+            ],
+            inApp: [
+                ['نصب امن', 'پیش‌فرض‌های عمومی مخزن هرگز به کار نمی‌روند: UUID، رمز Trojan و مسیر اشتراک هنگام نصب تصادفی ساخته و به‌صورت راز روی ورکر گذاشته می‌شوند.'],
+                ['از کجا نصب و بروز می‌شود', 'فایل worker.js از آخرین انتشار پایدار مخزن سازنده. چون کد نترا نشانه‌های BPB را هم دارد، استور اول نترا را تشخیص می‌دهد تا کد BPB هرگز روی آن نرود. بروزرسانی فقط کد را عوض می‌کند؛ رازها و KV می‌مانند.'],
+            ],
+            facts: [['مجوز', 'MIT'], ['داده‌ها', 'KV روی حساب خودتان']],
+            devBox: { name: 'Netra', logo: 'assets/dev/netrair.png',
+                line: 'سازندهٔ Netra Panel. پشتیبانی و خبرها در تلگرام است و رباتشان پنل را نصب می‌کند.',
+                links: [repoLink('netrair/netra-panel'), gh('netrair'), tg('پشتیبانی تلگرام', 'https://t.me/NetraIR'), ['ربات نصب', 'https://t.me/irNetra_bot', 'ph-fill ph-robot']] } },
+        gozargah: { img: 'assets/dev/panelgozargah.png', tint: 'teal', dev: 'Gozargah',
+            sub: 'پنل چندکاربره در یک فایل، با دیتابیس D1',
+            about: [
+                ['این پنل چیست', 'پنل پروکسی چندکاربره که کامل روی ورکر کلادفلر زندگی می‌کند: پنل مدیریت، موتور پروکسی، سازندهٔ اشتراک و صفحهٔ وضعیت کاربر، همه در یک فایل جاوااسکریپت و بدون وابستگی، با دیتابیس D1.'],
+                ['چه چیزهایی دارد', 'VLESS و Trojan؛ پیش‌تنظیم اختصاصی همراه اول، ایرانسل، رایتل، شاتل و مخابرات (اثرانگشت، فرگمنت و پورت) که فقط با انتخاب صریح کاربر اعمال می‌شود؛ خروجی Xray که خودش سریع‌ترین مسیر را انتخاب می‌کند؛ و صفحهٔ وضعیت زنده برای هر کاربر با دکمه‌های ورود یک‌کلیکی به کلاینت‌ها.'],
+            ],
+            inApp: [
+                ['نصب امن', 'گذرگاه با پیش‌فرض‌های عمومی بالا می‌آید (رمز «admin»)، پس برنامه بلافاصله بعد از نصب وارد می‌شود و مسیر پنل و رمز را به مقدارهای تصادفی عوض می‌کند.'],
+                ['از کجا نصب و بروز می‌شود', 'فایل gozargah-worker.js از آخرین انتشار پایدار مخزن سازنده. جدول‌های دیتابیس را خود پنل ارتقا می‌دهد؛ کاربران و رمز دست نمی‌خورند.'],
+            ],
+            facts: [['مجوز', 'MIT'], ['داده‌ها', 'دیتابیس D1 روی حساب خودتان']],
+            devBox: { name: 'Gozargah', logo: 'assets/dev/panelgozargah.png',
+                line: 'سازندگان پنل گذرگاه. کد، انتشارها و راهنمای کامل فارسی در گیت‌هاب است و وب‌سایت پروژه معرفی و مستنداتش را دارد.',
+                links: [repoLink('panelgozargah/gozargah'), gh('panelgozargah'), ['وب‌سایت', 'https://gozargah.dpdns.org/', 'ph-fill ph-globe']] } },
+        nova: { img: 'assets/dev/irnova.jpg', tint: 'indigo', dev: 'Nova Proxy',
+            sub: 'پروکسی با پنل کامل روی یک ورکر، روی حساب خودتان',
+            about: [
+                ['این پنل چیست', 'پروکسی مقاوم در برابر سانسور با پنل مدیریت کامل، روی یک ورکر کلادفلر و پلن رایگان. روی حساب خودتان مستقر می‌شود، پس پهنای باند، دامنه و داده‌ها مال خودتان است.'],
+                ['چه چیزهایی دارد', 'VLESS، Trojan، Shadowsocks، gRPC و XHTTP؛ پنل چندزبانه؛ چندکاربره با سقف حجم و انقضا؛ پیش‌تنظیم‌های مقاومت برای ایران؛ «Nova Radar» که در مرورگر آی‌پی تمیز پیدا می‌کند؛ نود وارپ برای تماس‌ها؛ لینک ترکیبی VLESS و Trojan؛ آینهٔ اشتراک روی گیت‌هاب؛ و ربات تلگرام برای مدیریت کاربران.'],
+                ['مجوز', 'PolyForm Noncommercial: استفادهٔ غیرتجاری آزاد است؛ استفادهٔ تجاری، فروش و میزبانی پولی مجوز جداگانهٔ سازنده را می‌خواهد.'],
+            ],
+            inApp: [
+                ['هرگز در برنامه گنجانده نمی‌شود', 'هر نصب و بروزرسانی مستقیم از مخزن سازنده گرفته و با SHA-256 همان commit که سازنده در version.json منتشر کرده سنجیده می‌شود؛ ناهمخوانی یعنی نصب نمی‌شود.'],
+                ['نصب امن', 'نوای تازه رمز ندارد و صفحهٔ نصبش عمومی است — هر کس اول رمز بگذارد صاحبش می‌شود. برای همین برنامه بلافاصله بعد از آپلود رمز را می‌گذارد.'],
+            ],
+            facts: [['مجوز', 'PolyForm Noncommercial 1.0.0'], ['داده‌ها', 'دیتابیس D1 و KV روی حساب خودتان']],
+            devBox: { name: 'Nova Proxy', logo: 'assets/dev/irnova.jpg',
+                line: 'سازندهٔ Nova Proxy و کلاینت Nova Client. وب‌سایت، کانال تلگرام و ربات نصب دارند.',
+                links: [repoLink('IRNova/Nova-Proxy'), gh('IRNova'), ['وب‌سایت', 'https://novaproxy.online/', 'ph-fill ph-globe'], tg('کانال تلگرام', 'https://t.me/irnova_proxy')] } },
+        nahan: { img: 'assets/dev/itsyebekhe.jpg', tint: 'purple', dev: 'itsyebekhe',
+            sub: 'دروازهٔ پنهان VLESS و Trojan با دیتابیس D1',
+            about: [
+                ['این پنل چیست', '«نهان» دروازه‌ای سبک و قابل‌تنظیم روی ورکر کلادفلر است که با VLESS یا Trojan کار می‌کند و یک پنل وب کامل دارد؛ تنظیماتش در دیتابیس D1 می‌ماند.'],
+                ['چه چیزهایی دارد', 'درخواست‌های غیرمجاز به یک سایت معمولی فرستاده می‌شوند تا دروازه برای اسکنرها یک وب‌سایت عادی به نظر برسد. چندکاربره با لینک اشتراک جدا و سقف مصرف، ساختن کانفیگ برای فهرست آی‌پی‌های تمیز، NAT64، کلید قطع فوری، ECH، پشتیبان‌گیری، ربات تلگرام و بروزرسانی خودکار از گیت‌هاب.'],
+            ],
+            inApp: [
+                ['نصب امن', 'کلید اصلی و مسیر API هنگام نصب تصادفی ساخته می‌شوند.'],
+                ['از کجا نصب و بروز می‌شود', 'فایل _worker.js روی شاخهٔ اصلی مخزن سازنده، در آخرین commit. تنظیمات، کاربران و کلید پنل در D1 خود پنل می‌مانند و بروزرسانی فقط کد را عوض می‌کند. گوشی هم همین کد را نصب می‌کند، پس هر دو برنامه می‌توانند یک نصب را بروز کنند.'],
+            ],
+            facts: [['مجوز', 'MIT (به گفتهٔ راهنمای مخزن)'], ['داده‌ها', 'دیتابیس D1 روی حساب خودتان']],
+            devBox: { name: 'itsyebekhe', logo: 'assets/dev/itsyebekhe.jpg',
+                line: 'سازندهٔ پروژهٔ نهان. ربات تلگرامش پنل را نصب می‌کند و راهنمای فارسی هم در مخزن هست.',
+                links: [repoLink('itsyebekhe/nahan'), gh('itsyebekhe'), ['ربات نصب', 'https://t.me/itsyebekhebot', 'ph-fill ph-robot']] } },
+        mlm: { img: 'assets/dev/mlmvpn.jpg', tint: 'orange', dev: 'MLM VPN',
+            sub: 'پنل خود پروژه، روی حساب کلادفلر خودتان',
+            about: [
+                ['این پنل چیست', 'پنل خود پروژهٔ MLM VPN روی ورکر کلادفلر با دیتابیس D1: کاربران با لینک اشتراک و صفحهٔ وضعیت، تنظیم آی‌پی پروکسی و گزارش‌ها، از یک پنل مدیریت رمزدار.'],
+            ],
+            inApp: [
+                ['از کجا نصب و بروز می‌شود', 'از مخزن عمومی اندروید همین پروژه، روی شاخهٔ اصلی و آخرین commit. اگر گیت‌هاب در دسترس نبود یا آنجا کد دیگری بود، نسخهٔ همراه برنامه به کار می‌رود.'],
+                ['بروزرسانی چه چیزی را عوض می‌کند', 'با رمز تصادفی نصب می‌شود؛ بروزرسانی فقط کد را عوض می‌کند و کاربران و رمز می‌مانند. «کانفیگ استدیو» پنل دیگری است که فقط گوشی نصب و بروز می‌کند.'],
+            ],
+            facts: [['داده‌ها', 'دیتابیس D1 روی حساب خودتان']],
+            devBox: { name: 'MLM VPN', logo: 'assets/dev/mlmvpn.jpg',
+                line: 'همین برنامه. کد نسخهٔ ویندوز و اندروید در گیت‌هاب پروژه است و خبرها در کانال تلگرام.',
+                links: [repoLink('mlmvpn/mlmvpn_android'), gh('mlmvpn'), tg('کانال تلگرام', 'https://t.me/mlmvpn')] } },
+    });
+    LOOK.rvg = {
+        icon: 'g-railway-art', art: true, tint: 'indigo', dev: 'codebox',
+        sub: 'پنل RVG Gateway روی حساب Railway خودتان',
+        desc: 'روی حساب Railway خودتان مستقر است و مستقیم از مخزن سازنده ساخته می‌شود. «استقرار دوباره» سرویس را از آخرین کد سازنده دوباره می‌سازد؛ دیسک، دامنه، رمز و کانفیگ‌ها سر جایشان می‌مانند.',
+        about: [
+            ['این پنل چیست', 'RVG Gateway یک پنل مدیریت پراکسی با پایتون (FastAPI) است که روی سرور خودتان اجرا می‌شود: برای هر کاربر یک لینک می‌سازد، سقف حجم و تاریخ انقضا نگه می‌دارد، مصرف را می‌شمارد، و خودش ترافیک را سرو می‌کند.'],
+            ['پروتکل‌ها', 'در این برنامه فقط آن‌هایی پیشنهاد می‌شوند که روی دامنهٔ HTTPS خود Railway کار می‌کنند: <code dir="ltr">vless-ws</code>، <code dir="ltr">xhttp-packet-up</code>، <code dir="ltr">xhttp-stream-up</code> و همین‌ها برای Trojan. MTProto و Shadowsocks پورت TCP خام می‌خواهند که این جادوگر نمی‌سازد.'],
+            ['مجوز', 'سازنده اجرا و استقرار نسخهٔ دست‌نخورده را آزاد گذاشته و انتشار نسخهٔ تغییریافته را ممنوع کرده است. این برنامه هیچ کدی از RVG را در خودش ندارد و تغییری در آن نمی‌دهد: Railway مستقیم از مخزن سازنده می‌سازد.'],
+        ],
+        facts: [
+            ['زبان', 'Python (FastAPI + uvicorn)'],
+            ['محل اجرا', 'حساب Railway خودتان'],
+            ['منبع نصب', 'مخزن عمومی سازنده (arvin341az-glitch/RVG)'],
+        ],
+        devBox: {
+            name: 'codebox',
+            line: 'سازندهٔ پنل RVG Gateway. کد و بروزرسانی‌ها در گیت‌هاب سازنده است.',
+            links: [
+                ['مخزن این پروژه', 'https://github.com/arvin341az-glitch/RVG', 'ph-fill ph-folder-open'],
+                ['گیت‌هاب سازنده', 'https://github.com/arvin341az-glitch', 'ph-fill ph-github-logo'],
+            ],
+        },
+    };
     const look = (id) => LOOK[id] || { icon: 'g-server', tint: 'gray', dev: '', sub: '' };
 
     const GROUPS = {
         cores: { title: 'هسته‌های موتور', hint: 'فایل‌های اجرایی که موتورها را می‌رانند. نسخهٔ تازه در پوشهٔ جدا نصب می‌شود و از اجرای بعدی همان موتور استفاده می‌شود.' },
+        panels: { title: 'پنل‌های ابری', hint: 'همان نُه پنل پنجرهٔ «ابری». هر کدام مستقیم از گیت‌هاب سازنده‌اش نصب و بروز می‌شود؛ بروزرسانی فقط کد ورکر را عوض می‌کند و تنظیمات، رمزها، KV و دیتابیس سر جایشان می‌مانند.' },
         workers: { title: 'ورکرها و پنل‌های ابری', hint: 'روی حساب خودتان مستقرند. بروزرسانی فقط کد را عوض می‌کند؛ تنظیمات، رمزها و دیتابیس دست نمی‌خورند.' },
         data: { title: 'داده‌ها', hint: 'فایل‌هایی که برنامه با آن‌ها کار می‌کند و از پروژهٔ خودشان تازه می‌شوند — برنامه بعد از گرفتن، خودش دوباره می‌سازدشان و با موتور آزمایششان می‌کند.' },
         app: { title: 'برنامه', hint: '' },
@@ -248,6 +404,7 @@
         unchecked: 'بررسی نشده',
         missing: 'نصب نشده',
         external: 'از اندروید مدیریت می‌شود',
+        absent: 'روی حساب‌هایتان نصب نیست',
     };
 
     // ── state ────────────────────────────────────────────────────────────────
@@ -260,12 +417,17 @@
 
     const rowById = (id) => data.rows.filter(r => r.id === id);
     const byGroup = (g) => data.rows.filter(r => r.group === g);
-    const pending = () => data.rows.filter(r => r.state === 'update' || r.state === 'missing');
+    // A panel's «update» is its copies' updates, which are rows of their own — counting both would
+    // say «two updates» for one Worker.
+    const pending = () => data.rows.filter(r => r.kind !== 'panel' && (r.state === 'update' || r.state === 'missing'));
+    /** The deployed copies of one Cloud panel, across every account. */
+    const copiesOf = (id) => data.rows.filter(r => r.kind === 'worker' && r.id === id);
 
     function jobOf(row) {
         const key = row.kind === 'core' ? 'core:' + row.id
             : row.kind === 'worker' ? 'worker:' + row.accountId + ':' + row.script
-                : row.kind === 'vodi' ? 'vodi:' + row.gatewayId : '';
+                : row.kind === 'vodi' ? 'vodi:' + row.gatewayId
+                    : row.kind === 'panel' ? 'panel:' + row.id : '';
         return jobsMap[key] || null;
     }
 
@@ -291,9 +453,18 @@
         failed: 'ناموفق', cancelled: 'لغو شد', core: 'هسته', worker: 'ورکر',
     };
 
+    // A panel job counts Workers and repositories, not megabytes.
+    const PANEL_PHASE = { resolve: 'خواندن کد تازهٔ سازنده', scan: 'بررسی حساب', worker: 'بروزرسانی' };
+
     function progressBar(job) {
         if (!job || !job.running) return '';
         const pct = Math.round((job.progress || 0) * 100);
+        if (job.kind === 'panel' || job.kind === 'panel-live') {
+            const said = (PANEL_PHASE[job.phase] || PHASE[job.phase] || job.phase) + (job.detail ? ' — ' + esc(job.detail) : '')
+                + (job.total > 1 ? ' · ' + fa(Math.min(job.bytes + 1, job.total)) + ' از ' + fa(job.total) : '');
+            return '<div class="as-job"><div class="as-prog' + (pct ? '' : ' is-idle') + '"><i style="width:' + pct + '%"></i></div>' +
+                '<small>' + said + '</small></div>';
+        }
         const label = (PHASE[job.phase] || job.phase) + (job.route ? ' — از ' + esc(job.route) : '') +
             (job.total ? ' · ' + fa(Math.round(job.bytes / 1048576)) + '/' + fa(Math.round(job.total / 1048576)) + ' مگابایت' : '');
         return '<div class="as-job"><div class="as-prog' + (pct ? '' : ' is-idle') + '"><i style="width:' + pct + '%"></i></div>' +
@@ -311,6 +482,16 @@
         const cls = big ? 'as-get' : 'as-pill';
         const quiet = big ? ' is-quiet' : '';
         const out = [];
+        if (row.kind === 'panel') {
+            // One Cloud panel: its button acts on every copy on every account. A copy that is being
+            // uploaded is not cancelled halfway, so there is no «لغو» here — only what is happening.
+            if (j && j.running) return '<span class="as-note-inline">در حال بروزرسانی…</span>';
+            if (row.state === 'update') return '<button type="button" class="' + cls + ' is-go" data-pupdate="' + esc(row.id) + '">بروزرسانی</button>';
+            if (row.state === 'absent') return '<button type="button" class="' + cls + (big ? ' is-go' : '') + '" data-cloud="1">نصب در «ابری»</button>';
+            if (row.state === 'unchecked') return '<button type="button" class="' + cls + quiet + '" data-workers="1">بررسی حساب‌ها</button>';
+            if (big) return '<button type="button" class="' + cls + quiet + '" data-pcheck="' + esc(row.id) + '">بررسی گیت‌هاب سازنده</button>';
+            return '<button type="button" class="' + cls + '" data-open="' + esc(rowKey(row)) + '">جزئیات</button>';
+        }
         if (j && j.running) {
             out.push('<button type="button" class="' + cls + quiet + '" data-cancel="1" data-row="' + esc(rowKey(row)) + '">لغو</button>');
             return out.join('');
@@ -376,6 +557,13 @@
     }
 
     function stateLine(r) {
+        if (r.kind === 'panel') {
+            if (r.state === 'update') return fa(r.behind) + ' نصب عقب‌تر از سازنده';
+            if (r.state === 'current') return 'بروز · ' + fa(r.copies) + ' نصب';
+            if (r.state === 'absent') return 'روی حسابتان نیست';
+            if (r.state === 'unchecked') return (r.unsurveyed || []).length ? 'نصب شده · بررسی نشده' : 'حساب‌ها بررسی نشده';
+            return 'بررسی نشده';
+        }
         if (r.state === 'update' && r.target) return 'به ' + r.target.version;
         if (r.state === 'current' && r.version) return 'نسخهٔ ' + r.version;
         // A deployed server is not "unchecked" — there is nothing to check. The panel's
@@ -395,7 +583,7 @@
     // ── views ────────────────────────────────────────────────────────────────
 
     function viewDiscover() {
-        const updates = data.rows.filter(x => x.state === 'update');
+        const updates = data.rows.filter(x => x.kind !== 'panel' && x.state === 'update');
         const fromDevs = data.rows.filter(x => x.upstreamNewer);
         const cores = byGroup('cores');
         const workers = byGroup('workers');
@@ -432,6 +620,12 @@ ${updates.length ? `
 </div>
 
 <div class="as-sec">
+  <div class="as-sec-head"><h2>پنل‌های ابری</h2><button type="button" class="as-seeall" data-go="panels">همه</button></div>
+  <p class="as-sec-note">همهٔ پنل‌های پنجرهٔ «ابری»، هر کدام مستقیم از گیت‌هاب سازنده‌اش — چه نصب کرده باشید چه نه.</p>
+  ${rowGrid(byGroup('panels'))}
+</div>
+
+<div class="as-sec">
   <div class="as-sec-head"><h2>ورکرهای حساب شما</h2><button type="button" class="as-seeall" data-go="workers">همه</button></div>
   ${workers.length ? rowGrid(workers.slice(0, 6)) : emptyWorkers()}
 </div>
@@ -461,6 +655,7 @@ ${updates.length ? `
         const meta = GROUPS[g] || { title: '', hint: '' };
         const items = byGroup(g);
         if (g === 'workers') return viewWorkers(meta);
+        if (g === 'panels') return viewPanels(meta);
         return `
 <div class="as-sec">
   <div class="as-sec-head"><h2>${esc(meta.title)}</h2></div>
@@ -495,8 +690,196 @@ ${updates.length ? `
 </div>`;
     }
 
+    /** The running «بررسی گیت‌هاب سازنده» job for one panel (or for all nine), if any. */
+    const checkJobOf = (id) => {
+        const one = jobsMap['panel-live:' + id];
+        const all = jobsMap['panel-live:all'];
+        return (one && one.running) ? one : (all && all.running) ? all : (one || null);
+    };
+
+    /** The nine panels of the Cloud window. */
+    function viewPanels(meta) {
+        const items = byGroup('panels');
+        // When each developer's GitHub was last looked at — asked this session, else read before.
+        const read = items.map(r => (r.asked && r.asked.at) || (r.latest && r.latest.at)).filter(Boolean);
+        const all = jobsMap['panel-live:all'];
+        return `
+<div class="as-sec">
+  <div class="as-sec-head">
+    <h2>${esc(meta.title)}</h2>
+    <button type="button" class="as-pill as-allbtn" data-pcheck=""${all && all.running ? ' disabled' : ''}>بررسی گیت‌هاب سازنده‌ها</button>
+  </div>
+  <div class="as-scan-line">${all && all.running
+        ? 'در حال خواندن کد تازهٔ سازنده‌ها' + (all.detail ? ' — ' + esc(all.detail) : '') + '…'
+        : read.length ? 'گیت‌هاب سازنده‌ها آخرین بار ' + when(Math.min.apply(null, read)) + ' بررسی شد · ' + fa(read.length) + ' از ' + fa(items.length) + ' پنل'
+            : 'کد سازنده‌ها هنوز از گیت‌هاب خوانده نشده است.'}</div>
+  ${rowGrid(items)}
+  <div class="as-sec-foot">${esc(meta.hint)}</div>
+  <div class="as-sec-foot">«بروز» یعنی کدِ روی ورکر شما همان آخرین کدی است که سازنده منتشر کرده. تعداد نصب‌ها از آخرین «بررسی حساب‌ها» می‌آید${data.workersCheckedAt ? ' (' + when(data.workersCheckedAt) + ')' : ' — که هنوز انجام نشده'}.</div>
+</div>`;
+    }
+
+    /** «از زبان سازنده»، «توسعه‌دهنده» و «در این برنامه» — the same three blocks on every product page. */
+    function storyBlocks(l) {
+        return `
+  ${l.about ? `
+  <div class="as-block">
+    <div class="as-block-head"><h3>از زبان سازنده</h3><span class="as-when">${ltr(l.dev || '')}</span></div>
+    ${l.about.map(([h, p]) => `<h4 class="as-sub-h">${esc(h)}</h4><p class="as-desc">${esc(p)}</p>`).join('')}
+  </div>` : ''}
+
+  ${l.devBox ? `
+  <div class="as-block">
+    <div class="as-block-head"><h3>توسعه‌دهنده</h3></div>
+    <div class="as-dev">
+      ${l.devBox.logo
+            ? `<img class="as-dev-logo" src="${esc(l.devBox.logo)}" alt="">`
+            : `<span class="as-dev-logo is-letter">${esc(String(l.devBox.name || '?').charAt(0).toUpperCase())}</span>`}
+      <div class="as-dev-text">
+        <b>${ltr(l.devBox.name)}</b>
+        <p>${esc(l.devBox.line)}</p>
+        <div class="as-dev-links">
+          ${(l.devBox.links || []).map(([label, url, ic]) => `<button type="button" class="as-dev-link" data-open-url="${esc(url)}"><i class="${esc(ic)}"></i>${esc(label)}</button>`).join('')}
+        </div>
+      </div>
+    </div>
+  </div>` : ''}
+
+  ${l.inApp ? `
+  <div class="as-block">
+    <div class="as-block-head"><h3>در این برنامه</h3><span class="as-when">${ltr('MLM VPN')}</span></div>
+    ${l.inApp.map(([h, p]) => `<h4 class="as-sub-h">${esc(h)}</h4><p class="as-desc">${esc(p)}</p>`).join('')}
+  </div>` : ''}`;
+    }
+
+    /** Where a panel's code is read from, in one sentence — built from what the server says. */
+    function panelSourceLine(it) {
+        const s = it.source;
+        if (!s) return '';
+        const file = '<span class="as-code">' + ltr(s.type === 'release' ? s.asset : s.path) + '</span>';
+        const where = s.type === 'release'
+            ? 'فایل ' + file + ' از آخرین انتشار پایدار'
+            : 'فایل ' + file + ' روی شاخهٔ <span class="as-code">' + ltr(s.branch) + '</span>، در آخرین commit';
+        return where + ' در مخزن <span class="as-code">' + ltr(s.repo) + '</span>';
+    }
+
+    /** The GitHub page of exactly the code the store would install. */
+    function panelLiveUrl(it) {
+        const s = it.source, v = it.latest;
+        if (!s) return 'https://github.com/' + it.repo;
+        if (!v || !v.ref) return 'https://github.com/' + s.repo + (s.type === 'release' ? '/releases' : '/commits/' + s.branch);
+        return 'https://github.com/' + s.repo + (s.type === 'release' ? '/releases/tag/' + encodeURIComponent(v.ref) : '/commit/' + v.ref);
+    }
+
+    function panelJobSummary(j) {
+        if (!j || j.running || !j.result) return '';
+        const r = j.result;
+        const parts = [];
+        if (r.done && r.done.length) parts.push(fa(r.done.length) + ' نصب بروز شد');
+        if (r.current && r.current.length) parts.push(fa(r.current.length) + ' نصب از قبل بروز بود');
+        if (r.failed && r.failed.length) parts.push(fa(r.failed.length) + ' نصب بروز نشد');
+        return parts.length ? '<div class="as-callout">' + parts.join(' · ') + '.</div>' : '';
+    }
+
+    /** A Cloud panel's own page: the developer's code, the developer, and every copy on the user's accounts. */
+    function viewPanel(it) {
+        const l = look(it.id);
+        const j = jobOf(it);
+        const cj = checkJobOf(it.id);
+        const copies = copiesOf(it.id);
+        const unseen = it.unsurveyed || [];          // installed per the Cloud window, not read yet
+        const latest = it.latest;
+        const checked = !!data.workersCheckedAt;
+        const known = checked || unseen.length;
+        const info = [];
+        if (it.repo) info.push(['مخزن سازنده', it.repo]);
+        if (it.source) info.push(['فایلی که نصب می‌شود', it.source.type === 'release' ? it.source.asset : it.source.path]);
+        if (it.source) info.push(['از کجا', it.source.type === 'release' ? 'آخرین انتشار پایدار' : 'شاخهٔ ' + it.source.branch + '، آخرین commit']);
+        if (l.dev) info.push(['سازنده', l.dev]);
+        (l.facts || []).forEach((f) => info.push(f));
+        info.push(['محل اجرا', 'ورکر کلادفلر روی حساب خودتان']);
+        return `
+<div class="as-prod">
+  <div class="as-prod-top">
+    ${appIcon(it, 'is-big')}
+    <div class="as-prod-head">
+      <h1>${esc(it.title)}</h1>
+      <div class="as-prod-sub">${esc(l.sub || '')}</div>
+      <div class="as-prod-cta">
+        ${actions(it, { big: true })}
+        ${it.state !== 'absent' ? '<button type="button" class="as-get is-quiet" data-cloud="1">باز کردن «ابری»</button>' : ''}
+        <span class="as-cta-note">${esc(it.state === 'update' ? fa(it.behind) + ' نصب از آخرین کد سازنده عقب است'
+            : unseen.length ? 'نصب شده — نسخه‌اش هنوز خوانده نشده؛ «بررسی حساب‌ها» را بزنید' : STATE_TEXT[it.state] || '')}</span>
+      </div>
+      ${progressBar(j)}${jobError(j)}
+    </div>
+  </div>
+
+  <div class="as-stats">
+    <div class="as-stat"><div class="as-stat-k">آخرین کد سازنده</div><div class="as-stat-v as-sm">${ltr(latest ? latest.version : '—')}</div></div>
+    <div class="as-stat"><div class="as-stat-k">نصب روی حساب‌ها</div><div class="as-stat-v">${known ? fa(copies.length + unseen.length) : '—'}</div><div class="as-stat-c">${
+        unseen.length ? fa(unseen.length) + ' بررسی نشده'
+            : checked ? (it.behind ? fa(it.behind) + ' عقب' : copies.length ? 'همه بروز' : 'نصب نیست') : 'بررسی نشده'}</div></div>
+    <div class="as-stat"><div class="as-stat-k">وضعیت</div><div class="as-stat-v as-ico-v"><i class="ph-fill ${it.state === 'update' ? 'ph-arrow-circle-down' : it.state === 'current' ? 'ph-check-circle' : it.state === 'absent' ? 'ph-cloud-slash' : 'ph-question'}"></i></div><div class="as-stat-c">${esc(STATE_TEXT[it.state] || '')}</div></div>
+    <div class="as-stat"><div class="as-stat-k">منبع</div><div class="as-stat-v as-ico-v"><i class="ph-fill ph-github-logo"></i></div><div class="as-stat-c">گیت‌هاب سازنده</div></div>
+  </div>
+
+  ${panelJobSummary(j)}
+
+  <div class="as-callout">
+    مستقیم از گیت‌هاب سازنده: ${panelSourceLine(it)}. پیش از نصب، کد دریافتی باید اثرانگشت همین پنل را
+    داشته باشد${it.source && it.source.signed ? ' و با هش SHA-256 که سازنده کنارش منتشر کرده یکی باشد' : ''}، وگرنه کنار گذاشته می‌شود.
+    بروزرسانی فقط کد ورکر را عوض می‌کند و کد قبلی روی همین کامپیوتر نگه داشته می‌شود تا با یک کلیک برگردد.
+  </div>
+
+  ${storyBlocks(l)}
+
+  <div class="as-block">
+    <div class="as-block-head"><h3>نصب‌های شما</h3><span class="as-when">${checked ? 'بررسی حساب‌ها: ' + esc(when(data.workersCheckedAt)) : ''}</span></div>
+    ${unseen.length ? `<p class="as-desc">پنجرهٔ «ابری» ${fa(unseen.length)} نصب از این پنل را ثبت کرده که بعد از آخرین بررسی حساب‌ها ساخته شده${unseen.length > 1 ? 'اند' : ''}
+      (${unseen.map(s => '<span class="as-code">' + ltr(s) + '</span>').join('، ')}). «بررسی حساب‌ها» نسخه‌شان را می‌خواند؛ «بروزرسانی» هم اول همین کار را می‌کند.</p>` : ''}
+    ${copies.length ? rowGrid(copies)
+        : unseen.length ? ''
+        : `<p class="as-desc">${checked
+            ? 'روی حساب‌های کلادفلری که به برنامه داده‌اید نسخه‌ای از ' + esc(it.title) + ' پیدا نشد. از کارت حساب در پنجرهٔ «ابری» نصبش کنید — نصب هم از همین آخرین کد سازنده است.'
+            : 'حساب‌های کلادفلر هنوز بررسی نشده‌اند، پس معلوم نیست این پنل کجا نصب است.'}</p>`}
+    <div class="as-up-acts"><button type="button" class="as-get is-quiet" data-workers="1">${checked ? 'بررسی دوبارهٔ حساب‌ها' : 'بررسی حساب‌ها'}</button></div>
+  </div>
+
+  <div class="as-block">
+    <div class="as-block-head"><h3>تازه‌ترین کد سازنده</h3><span class="as-when">${latest && latest.at ? 'خوانده‌شده: ' + esc(when(latest.at)) : ''}</span></div>
+    ${latest ? `
+    <div class="as-up-line">
+      <span class="as-code">${ltr(latest.version)}</span>
+      ${latest.ref && latest.ref !== latest.version ? `<span class="as-dot">·</span><span>commit <span class="as-code">${ltr(latest.ref)}</span></span>` : ''}
+    </div>
+    <p class="as-desc">نصب تازه و بروزرسانی هر دو همین کد را می‌گذارند. استور هر چند ساعت یک‌بار، وقتی باز باشد، خودش دوباره از گیت‌هاب سازنده می‌پرسد.</p>`
+        : '<p class="as-desc">کد این پنل هنوز از گیت‌هاب سازنده خوانده نشده — اینترنت را بررسی کنید و «بررسی گیت‌هاب سازنده» را بزنید.</p>'}
+    ${it.asked && it.asked.error ? `<p class="as-fine">آخرین پرسش از گیت‌هاب سازنده (${esc(when(it.asked.at))}) کد تازهٔ درستی نداد: ${esc(it.asked.error)}${latest ? ' — همان آخرین نسخهٔ سالمی که از گیت‌هاب خوانده شده به کار می‌رود.' : '.'}</p>` : ''}
+    ${cj && cj.running ? progressBar(cj) : jobError(cj)}
+    <div class="as-up-acts">
+      <button type="button" class="as-get is-quiet" data-open-url="${esc(panelLiveUrl(it))}">دیدن در گیت‌هاب</button>
+      <button type="button" class="as-get is-quiet" data-pcheck="${esc(it.id)}"${cj && cj.running ? ' disabled' : ''}>بررسی گیت‌هاب سازنده</button>
+    </div>
+  </div>
+
+  ${j && j.log && j.log.length ? `
+  <div class="as-block">
+    <div class="as-block-head"><h3>گزارش</h3></div>
+    <div class="as-log">${j.log.slice(-12).map(x => '<div>' + esc(x.line) + '</div>').join('')}</div>
+  </div>` : ''}
+
+  <div class="as-block">
+    <div class="as-block-head"><h3>اطلاعات</h3></div>
+    <div class="as-info">
+      ${info.map(([k, v]) => `<div class="as-info-row"><span class="as-info-k">${esc(k)}</span><span class="as-info-v">${/^[؀-ۿ]/.test(String(v)) ? esc(v) : '<span class="as-code">' + ltr(v) + '</span>'}</span></div>`).join('')}
+    </div>
+  </div>
+</div>`;
+    }
+
     function viewUpdates() {
-        const items = data.rows.filter(x => x.state === 'update' || x.state === 'missing' || busy(x));
+        const items = data.rows.filter(x => x.kind !== 'panel' && (x.state === 'update' || x.state === 'missing' || busy(x)));
         if (!items.length) return '<div class="as-empty"><i class="ph ph-check-circle"></i><p>همه‌چیز بروز است.</p></div>';
         return `
 <div class="as-sec">
@@ -537,8 +920,11 @@ ${updates.length ? `
     function viewProduct(key) {
         const it = findByKey(key);
         if (!it) return viewDiscover();
+        if (it.kind === 'panel') return viewPanel(it);
         const l = look(it.id);
         const j = jobOf(it);
+        // A deployed copy of a Cloud panel links to the panel's own page.
+        const panelKey = it.kind === 'worker' && findByKey('panel|' + it.id) ? 'panel|' + it.id : '';
 
         const info = [];
         info.push(['نسخهٔ در حال استفاده', it.version || '—']);
@@ -581,6 +967,7 @@ ${updates.length ? `
         ${actions(it, { big: true })}
         ${(it.kind === 'core' || it.kind === 'data') && it.canRollback ? '<button type="button" class="as-get is-quiet" data-rollback="' + esc(it.id) + '">برگشت به ' + esc(it.rollbackTo || 'نسخهٔ قبل') + '</button>' : ''}
         ${it.kind === 'worker' && it.managedBy === 'windows' ? '<button type="button" class="as-get is-quiet" data-wrollback="' + esc(rowKey(it)) + '">برگرداندن کد قبلی</button>' : ''}
+        ${panelKey ? '<button type="button" class="as-get is-quiet" data-open="' + esc(panelKey) + '">صفحهٔ پنل</button>' : ''}
         <span class="as-cta-note">${esc(STATE_TEXT[it.state] || '')}</span>
       </div>
       ${progressBar(j)}${jobError(j)}
@@ -606,32 +993,7 @@ ${updates.length ? `
 
   ${it.missingKeys && it.missingKeys.length ? `<div class="as-callout is-warn">این نسخه ${fa(it.missingKeys.length)} کلید را ندارد که نسخهٔ تازه دارد: <span class="as-code" dir="ltr">${esc(it.missingKeys.join('، '))}</span></div>` : ''}
 
-  ${l.about ? `
-  <div class="as-block">
-    <div class="as-block-head"><h3>از زبان سازنده</h3><span class="as-when">${ltr(l.dev || '')}</span></div>
-    ${l.about.map(([h, p]) => `<h4 class="as-sub-h">${esc(h)}</h4><p class="as-desc">${esc(p)}</p>`).join('')}
-  </div>` : ''}
-
-  ${l.devBox ? `
-  <div class="as-block">
-    <div class="as-block-head"><h3>توسعه‌دهنده</h3></div>
-    <div class="as-dev">
-      <img class="as-dev-logo" src="${esc(l.devBox.logo)}" alt="">
-      <div class="as-dev-text">
-        <b>${ltr(l.devBox.name)}</b>
-        <p>${esc(l.devBox.line)}</p>
-        <div class="as-dev-links">
-          ${(l.devBox.links || []).map(([label, url, ic]) => `<button type="button" class="as-dev-link" data-open-url="${esc(url)}"><i class="${esc(ic)}"></i>${esc(label)}</button>`).join('')}
-        </div>
-      </div>
-    </div>
-  </div>` : ''}
-
-  ${l.inApp ? `
-  <div class="as-block">
-    <div class="as-block-head"><h3>در این برنامه</h3><span class="as-when">${ltr('MLM VPN')}</span></div>
-    ${l.inApp.map(([h, p]) => `<h4 class="as-sub-h">${esc(h)}</h4><p class="as-desc">${esc(p)}</p>`).join('')}
-  </div>` : ''}
+  ${storyBlocks(l)}
 
   ${!l.about && l.desc ? `<div class="as-block">${esc(l.desc).split(PARA).map(p => `<p class="as-desc">${p}</p>`).join('')}</div>` : ''}
 
@@ -689,7 +1051,8 @@ ${updates.length ? `
     const SIDE = [
         [['discover', 'کشف', 'ph-fill ph-star', 'var(--mv-blue)']],
         [['cores', 'هسته‌های موتور', 'ph-fill ph-cpu', 'var(--mv-indigo)'],
-        ['workers', 'ورکرها', 'ph-fill ph-cloud', 'var(--mv-orange)'],
+        ['panels', 'پنل‌های ابری', 'ph-fill ph-cloud-arrow-up', 'var(--mv-orange)'],
+        ['workers', 'ورکرهای حساب', 'ph-fill ph-cloud', 'var(--mv-teal)'],
         ['app', 'برنامه', 'ph-fill ph-app-window', 'var(--mv-gray)']],
         [['updates', 'بروزرسانی‌ها', 'ph-fill ph-arrow-circle-down', 'var(--mv-green)']],
     ];
@@ -905,6 +1268,8 @@ ${updates.length ? `
   .as-dev { display:flex; align-items:flex-start; gap:15px; }
   .as-dev-logo { flex:none; width:66px; height:66px; border-radius:16px; object-fit:cover; background:#000;
     box-shadow:inset 0 0 0 1px rgba(255,255,255,.08), 0 1px 3px rgba(0,0,0,.22); }
+  .as-dev-logo.is-letter { display:grid; place-items:center; background:var(--mv-fill-2); color:var(--mv-label-2);
+    font-size:26px; font-weight:750; }
   .as-dev-text { min-width:0; }
   .as-dev-text > b { font-size:14.5px; font-weight:750; }
   .as-dev-text > p { margin:5px 0 10px; font-size:12.5px; line-height:1.85; color:var(--mv-label-2); }
@@ -1077,6 +1442,26 @@ ${updates.length ? `
             catch (err) { say(err.message); b.disabled = false; }
         }));
 
+        // A Cloud panel: every copy of it, on every account, to the developer's newest code.
+        root.querySelectorAll('[data-pupdate]').forEach(b => b.addEventListener('click', async (e) => {
+            e.stopPropagation(); b.disabled = true;
+            try { await post('/api/store/panel/update', { id: b.getAttribute('data-pupdate') }); refresh(); }
+            catch (err) { say(err.message); b.disabled = false; }
+        }));
+
+        // «بررسی گیت‌هاب سازنده» — one panel, or all nine when the attribute is empty.
+        root.querySelectorAll('[data-pcheck]').forEach(b => b.addEventListener('click', async (e) => {
+            e.stopPropagation(); b.disabled = true;
+            try { await post('/api/store/panel/check', { id: b.getAttribute('data-pcheck') || '' }); say('در حال خواندن از گیت‌هاب سازنده…'); refresh(); }
+            catch (err) { say(err.message); b.disabled = false; }
+        }));
+
+        // Installing a panel is the Cloud window's job: it knows the accounts and asks the questions.
+        root.querySelectorAll('[data-cloud]').forEach(b => b.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (window.MV && MV.wm) MV.wm.open('cloud');
+        }));
+
         root.querySelectorAll('[data-vodi]').forEach(b => b.addEventListener('click', async (e) => {
             e.stopPropagation(); b.disabled = true;
             try { await post('/api/store/vodi/redeploy', { id: b.getAttribute('data-vodi') }); refresh(); }
@@ -1198,11 +1583,19 @@ ${updates.length ? `
     /** Poll while anything is running — and stop as soon as nothing is, so an idle window is idle. */
     function startPolling() {
         if (poll) clearInterval(poll);
+        // One more redraw after the last job ends: the tick that saw it running loaded the catalogue
+        // BEFORE it finished, so without this a finished check kept showing the old version.
+        let wasRunning = false;
+        const running = () => Object.keys(jobsMap).some(k => jobsMap[k] && jobsMap[k].running);
         poll = setInterval(async () => {
             const root = document.getElementById('ls-store');
             if (!root || !root.offsetParent) return;          // the window is closed or hidden
-            const anyRunning = Object.keys(jobsMap).some(k => jobsMap[k] && jobsMap[k].running);
-            if (!anyRunning) { await pollJobs(); return; }
+            if (!running()) {
+                await pollJobs();
+                if (!running() && wasRunning) { wasRunning = false; await refresh(); }
+                return;
+            }
+            wasRunning = true;
             await refresh();
         }, 1500);
     }

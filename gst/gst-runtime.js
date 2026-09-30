@@ -147,7 +147,7 @@ async function setSystemProxy(enabled) {
         // A leftover adapter from the removed full-tunnel mode would black-hole the default
         // route while the proxy points at the engine. Nothing can turn it on any more, but a
         // machine that had it on before the update can still be carrying one.
-        if (tun.isRunning()) {
+        if (gstOwnsTunnel()) {
             tun.stopTun(line => log.info('runtime', line));
             store.setRuntime({ tun: false });
             log.info('runtime', 'تونل سراسری باقی‌مانده خاموش شد — این حالت دیگر وجود ندارد');
@@ -164,6 +164,15 @@ async function setSystemProxy(enabled) {
 }
 
 /**
+ * A tunnel on the shared adapter is GST's leftover only when gst.exe is what it carries. The
+ * adapter is shared: a V2Ray full tunnel or the GitHub Tunnel's own is somebody else's, and
+ * these clean-ups used to take down whatever was there.
+ */
+function gstOwnsTunnel() {
+    try { return tun.isRunning() && String(tun.currentEngine() || '').toLowerCase() === 'gst.exe'; } catch (e) { return false; }
+}
+
+/**
  * Undo every machine-wide change. Called when the tunnel stops, so a disconnected tunnel
  * never leaves Windows pointing at a dead proxy or a TUN adapter with no engine behind
  * it — the two states that strand a user with no internet and no obvious cause.
@@ -171,7 +180,7 @@ async function setSystemProxy(enabled) {
 async function releaseAll() {
     const changes = [];
     try {
-        if (tun.isRunning()) {
+        if (gstOwnsTunnel()) {
             tun.stopTun(line => log.info('runtime', line));
             changes.push('تونل سراسری');
         }
@@ -225,7 +234,7 @@ async function healAfterCrash() {
         // A TUN adapter with no engine behind it black-holes the default route. Our own
         // process cannot have started it (we just booted), so anything running is a
         // leftover from a previous run.
-        if (tun.isRunning()) {
+        if (gstOwnsTunnel()) {
             tun.stopTun(line => log.info('runtime', line));
             healed.push('تونل سراسری از اجرای قبلی باز مانده بود');
         }

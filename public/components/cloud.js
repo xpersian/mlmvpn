@@ -66,6 +66,12 @@ const cloudHtmlTemplate = `
     color: var(--mv-label-2); text-align: left;
   }
   .cl-wrap #cloud-received-configs-container { display: flex; flex-direction: column; gap: 10px; }
+  .cl-wrap .cl-lamps { display: inline-flex; gap: 4px; margin-top: 4px; }
+  .cl-wrap .cl-lamp { width: 8px; height: 8px; border-radius: 50%; background: var(--mv-fill-3, rgba(142,142,147,.35)); display: inline-block; }
+  .cl-wrap .cl-lamp.is-green { background: #30D158; }
+  .cl-wrap .cl-lamp.is-yellow { background: #FFD60A; }
+  .cl-wrap .cl-caret { transition: transform .2s; color: var(--mv-label-2); }
+  .cl-wrap .cl-caret.is-open { transform: rotate(180deg); }
 </style>
 <div id="cloud-wrapper" dir="rtl" class="cl-wrap mv-split">
   <aside class="mv-side" id="cloud-sidebar" aria-label="بخش‌های زیرساخت ابری">
@@ -112,9 +118,17 @@ const cloudHtmlTemplate = `
       <div class="mv-eng-sec is-on" data-cl-sec="accounts">
         <div class="mv-form">
           <div class="mv-form-section is-wide">
+            <div id="cloud-usage-module"></div>
+            <div class="mv-form-group" style="margin-bottom:14px">
+              <button type="button" class="mv-form-row cl-arena-row" onclick="MV && MV.wm && MV.wm.open('arena')" style="width:100%;background:none;border:0;cursor:pointer;text-align:right;font:inherit;color:inherit">
+                <span class="cp-sq" style="background:#FFD60A;color:#000"><svg viewBox="0 0 24 24" width="18" height="18" style="color:#000"><use href="#g-trophy"/></svg></span>
+                <span class="mv-form-label">میدان کانفیگ<small id="cloud-arena-winner">پنل‌هایتان را روی یک آی‌پی تمیز یکسان مسابقه بدهید</small></span>
+                <span class="mv-form-control"><i class="ph-bold ph-caret-left"></i></span>
+              </button>
+            </div>
             <div class="mv-form-header">اکانت‌های کلودفلر</div>
             <div id="cloud-accounts-container"></div>
-            <div class="mv-form-footer">هر اکانت می‌تواند سه پنل بگیرد — BPB، Edge و Zeus. «دریافت کانفیگ» کانفیگ‌های آن پنل را می‌آورد و در بخش «کانفیگ‌های دریافتی» نگه می‌دارد.</div>
+            <div class="mv-form-footer">هر اکانت می‌تواند این پنل‌ها را بگیرد — BPB، Edge، Zeus، اسپایدر، نترا، گذرگاه، نوا، نهان و MLM؛ همه از آخرین کد سازندهٔ خودشان. «دریافت کانفیگ» کانفیگ‌های آن پنل را می‌آورد و در بخش «کانفیگ‌های دریافتی» نگه می‌دارد.</div>
           </div>
         </div>
       </div>
@@ -1045,7 +1059,11 @@ window.deployCloudflare = async function(ignoreWarning = false, btn = null) {
         const res = await fetch("/api/cloudflare/deploy", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email, token, panelType: window._activePanelType || 'BPB' })
+            // The account's own panel, if it has one: the server reuses it (panel-registry.js) instead of a new Worker.
+            body: JSON.stringify({ email, token, panelType: window._activePanelType || 'BPB',
+                existingUrl: (window._activeCloudAccount && ((window._activePanelType === 'ZEUS') ? window._activeCloudAccount.zeusUrl : window._activeCloudAccount.url)) || '',
+                // A redeploy keeps the Zeus password this account already has (a new panel gets its own).
+                zeusPassword: (window._activePanelType === 'ZEUS' && window._activeCloudAccount && window._activeCloudAccount.zeusPassword) || undefined })
         });
         const data = await res.json();
         
@@ -1068,6 +1086,7 @@ window.deployCloudflare = async function(ignoreWarning = false, btn = null) {
             if (existingIdx !== -1) {
                 if (window._activePanelType === "ZEUS") {
                     accounts[existingIdx].zeusUrl = data.url;
+                    if (data.zeusPassword) accounts[existingIdx].zeusPassword = data.zeusPassword;
                     PersistentStorage.setItem('cf_accounts', JSON.stringify(accounts));
                     window._activeCloudAccount = accounts[existingIdx];
                     renderCloudAccounts();
@@ -1503,6 +1522,11 @@ window.renderCloudAccounts = function() {
     const container = document.getElementById("cloud-accounts-container");
     if (typeof window.cloudRenderIdent === 'function') window.cloudRenderIdent();
     if (!container) return;
+    if (typeof window.cloudUsagePaint === 'function') window.cloudUsagePaint();
+    if (typeof window.arenaLastWinner === 'function') window.arenaLastWinner().then((w) => {
+        const el = document.getElementById('cloud-arena-winner');
+        if (el && w) el.textContent = 'آخرین برنده: ' + w;
+    });
     const accounts = loadCloudAccounts();
 
     const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => (
@@ -1527,13 +1551,28 @@ window.renderCloudAccounts = function() {
      * deployed the only useful press is «استقرار»; afterwards it is «دریافت کانفیگ». The old card
      * carried that meaning in six hand-written class strings per panel.
      */
-    function panelRow(accId, key, label, deployed, deployLabel, mainLabel, mainAction, hasSettings) {
+    // The panel's own square (colour + letter, the same on every screen) and a status tag at the end
+    // of the row — Android 1.2.36 › ۳.۲. The subtitle says only what is new («n گروه کانفیگ گرفته‌اید»).
+    const SQ = { BPB: ['#0A84FF', 'B'], EDGE: ['#30D158', 'E'], ZEUS: ['#FF9F0A', 'Z'] };
+    function groupsFor(url) {
+        if (!url) return 0;
+        let host = '';
+        try { host = new URL(url).host; } catch (e) { return 0; }
+        try { return JSON.parse(PersistentStorage.getItem('cf_base_configs') || '[]').filter((g) => (g.configs || []).some((c) => String(c).includes(host)) || String(g.name || '').includes(host)).length; }
+        catch (e) { return 0; }
+    }
+    function panelRow(accId, key, label, deployed, deployLabel, mainLabel, mainAction, hasSettings, url) {
         const deployCls = 'mv-btn' + (deployed ? '' : ' mv-btn--primary');
         const mainCls = 'mv-btn' + (deployed ? ' mv-btn--primary' : '');
+        const n = deployed ? groupsFor(url) : 0;
+        const sub = deployed ? (n ? `${String(n).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[+d])} گروه کانفیگ گرفته‌اید` : 'هنوز کانفیگی نگرفته‌اید') : 'روی این حساب نصب نیست';
+        const sq = SQ[key] || ['#8E8E93', '?'];
         return `
-          <div class="mv-form-row">
-            <span class="mv-form-label">${esc(label)}<small${deployed ? ' class="is-on"' : ''}>${deployed ? 'مستقر شده' : 'هنوز مستقر نشده'}</small></span>
+          <div class="mv-form-row cp-row">
+            <span class="cp-sq" style="background:${sq[0]}">${sq[1]}</span>
+            <span class="mv-form-label">${esc(label)}<small>${sub}</small></span>
             <span class="mv-form-control">
+              ${deployed ? '<span class="cp-tag is-on">نصب شده</span>' : '<span class="cp-tag">نصب نشده</span>'}
               <button type="button" class="${deployCls}" onclick="window.triggerAction(this, 'DEPLOY', '${accId}', '${key}')">${esc(deployLabel)}</button>
               <button type="button" class="${mainCls}" onclick="window.triggerAction(this, '${mainAction}', '${accId}', '${key}')">${esc(mainLabel)}</button>
               ${hasSettings ? `<button type="button" class="mv-tb-btn" onclick="window.triggerAction(this, 'SETTINGS', '${accId}', '${key}')" title="تنظیمات ${esc(label)}" aria-label="تنظیمات ${esc(label)}"><i class="ph-bold ph-gear"></i></button>` : ''}
@@ -1544,17 +1583,28 @@ window.renderCloudAccounts = function() {
     container.innerHTML = accounts.map((acc, i) => {
         const accName = acc.email || acc.name || ("Account " + (i + 1));
         const bpb = !!acc.url, edge = !!acc.edgeUrl, zeus = !!acc.zeusUrl;
-        const live = [bpb, edge, zeus].filter(Boolean).length;
+        const live = [bpb, edge, zeus].filter(Boolean).length
+            + (typeof window.cloudPanelsInstalled === 'function' ? window.cloudPanelsInstalled(acc) : 0);
+        // One card open at a time when there are several; the rest fold to their header (▾).
+        const many = accounts.length > 1;
+        if (!window._cloudOpenAcc || !accounts.some((a) => a.id === window._cloudOpenAcc)) window._cloudOpenAcc = accounts[0].id;
+        const open = !many || window._cloudOpenAcc === acc.id;
+        // Header lamps for every panel: green = has configs, yellow = installed, dim = not installed.
+        const lamps = [['BPB', bpb, groupsFor(acc.url)], ['EDGE', edge, groupsFor(acc.edgeUrl)], ['ZEUS', zeus, groupsFor(acc.zeusUrl)]]
+            .map(([k, on, n]) => `<i class="cl-lamp ${on ? (n ? 'is-green' : 'is-yellow') : ''}" title="${k}"></i>`).join('')
+            + (typeof window.cloudPanelsLamps === 'function' ? window.cloudPanelsLamps(acc) : '');
 
         return `
-        <div class="mv-form-group cl-acc">
-          <div class="mv-status-head">
+        <div class="mv-form-group cl-acc${open ? '' : ' is-folded'}">
+          <div class="mv-status-head"${many ? ` role="button" tabindex="0" style="cursor:pointer" onclick="if(!event.target.closest('button')){window._cloudOpenAcc='${acc.id}';window.renderCloudAccounts();}"` : ''}>
             <span class="mv-side-tile" style="--tint:var(--mv-orange)"><i class="ph-fill ph-cloud"></i></span>
             <div class="mv-sh-text">
               <h2><bdi dir="ltr" style="font-family:var(--mv-font-tech)">${esc(accName)}</bdi></h2>
-              <p>${live ? `${['یک', 'دو', 'سه'][live - 1]} پنل مستقر است` : 'هنوز پنلی مستقر نشده'}</p>
+              <p>${many ? `حساب ${String(i + 1).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[+d])} از ${String(accounts.length).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[+d])} · ` : ''}${live ? `${['یک', 'دو', 'سه', 'چهار', 'پنج', 'شش', 'هفت'][live - 1] || String(live).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[+d])} پنل مستقر است` : 'هنوز پنلی مستقر نشده'}</p>
+              <span class="cl-lamps">${lamps}</span>
             </div>
             <div class="mv-sh-end">
+              ${many ? `<i class="ph-bold ph-caret-down cl-caret${open ? ' is-open' : ''}" aria-hidden="true"></i>` : ''}
               <button type="button" class="mv-tb-btn" onclick="window.toggleUsagePanel('${acc.id}')" title="مصرف امروزِ ورکرها" aria-label="مصرف امروز"><i class="ph-bold ph-chart-pie-slice"></i></button>
               <button type="button" class="mv-tb-btn" onclick="window.deleteCloudAccount('${acc.id}')" title="حذف اکانت" aria-label="حذف اکانت"><i class="ph-bold ph-trash"></i></button>
             </div>
@@ -1572,9 +1622,11 @@ window.renderCloudAccounts = function() {
             <div class="cl-usage-bar"><div id="usage-bar-${acc.id}" style="width:0%"></div></div>
           </div>
 
-          ${panelRow(acc.id, 'BPB', 'پنل BPB', bpb, bpb ? 'استقرار مجدد' : 'استقرار ورکر', 'دریافت کانفیگ', 'FETCH', false)}
-          ${panelRow(acc.id, 'EDGE', 'پنل Edge', edge, edge ? 'استقرار مجدد' : 'استقرار ورکر', 'دریافت کانفیگ', 'FETCH', true)}
-          ${panelRow(acc.id, 'ZEUS', 'پنل Zeus', zeus, zeus ? 'استقرار مجدد' : 'استقرار', 'مدیریت کاربران', 'FETCH', true)}
+          ${open ? `
+          ${panelRow(acc.id, 'BPB', 'پنل BPB', bpb, bpb ? 'استقرار مجدد' : 'استقرار ورکر', 'دریافت کانفیگ', 'FETCH', false, acc.url)}
+          ${panelRow(acc.id, 'EDGE', 'پنل Edge', edge, edge ? 'استقرار مجدد' : 'استقرار ورکر', 'دریافت کانفیگ', 'FETCH', true, acc.edgeUrl)}
+          ${panelRow(acc.id, 'ZEUS', 'پنل Zeus', zeus, zeus ? 'استقرار مجدد' : 'استقرار', 'مدیریت کاربران', 'FETCH', true, acc.zeusUrl)}
+          ${typeof window.cloudPanelsRows === 'function' ? window.cloudPanelsRows(acc) : ''}` : ''}
         </div>`;
     }).join('');
 };
@@ -1688,17 +1740,32 @@ window.renderCloudReceivedConfigs = function() {
         return;
     }
     
-    container.innerHTML = bases.map((group, idx) => `
+    // Each group carries its panel's square (Android 1.2.36 › ۳.۳); more than eight fold behind «همه».
+    const PANEL_SQ = { BPB: ['#0A84FF', 'B'], EDG: ['#30D158', 'E'], ZEUS: ['#FF9F0A', 'Z'], NHN: ['#BF5AF2', 'N'], MLM: ['#FF9F0A', 'M'],
+        SPD: ['#FF375F', 'S'], NTR: ['#9B59F6', 'Nt'], GZG: ['#40C8E0', 'G'], NVA: ['#5E5CE6', 'Nv'] };
+    const panelOfGroup = (g) => {
+        const m = g.metadata || {};
+        if (m.panel && PANEL_SQ[m.panel]) return m.panel;
+        if (m.zeusUsername) return 'ZEUS';
+        if (m.edgeUuid) return 'EDG';
+        if (m.isBpb) return 'BPB';
+        const n = String(g.name || '');
+        if (/-edg\b|edge/i.test(n)) return 'EDG';
+        return null;
+    };
+    const showAll = !!window._cloudGroupsAll;
+    const visible = showAll ? bases : bases.slice(0, 8);
+    container.innerHTML = visible.map((group, idx) => { const pc = panelOfGroup(group); const sq = pc ? PANEL_SQ[pc] : null; return `
         <div class="p-3.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-3 bg-m3-surface2 rounded-2xl">
             <div class="flex items-center gap-3 min-w-0 flex-1">
-                <div class="w-12 h-12 bg-m3-background rounded-xl flex items-center justify-center shadow-inner shrink-0">
-                    <span class="text-xl font-bold text-m3-onSurface font-mono">${group.configs.length}</span>
+                <div class="w-12 h-12 rounded-xl flex items-center justify-center shadow-inner shrink-0" style="background:${sq ? sq[0] : 'var(--mv-fill)'};color:${sq ? '#fff' : 'inherit'}">
+                    <span class="text-base font-bold font-mono">${sq ? sq[1] : group.configs.length}</span>
                 </div>
                 <div class="flex flex-col text-right min-w-0">
                     <span class="font-bold text-m3-onSurface text-sm truncate" title="${group.name || "کلاستر کلودفلر"}">${group.name || "کلاستر کلودفلر"}</span>
                     <div class="text-[11px] text-m3-onSurfaceVariant mt-1 flex items-center gap-1.5">
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                        <span class="truncate">تاریخ دریافت: ${group.date || "-"}</span>
+                        <span class="truncate">${String(group.configs.length).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[+d])} کانفیگ · <bdi dir="ltr">${group.date || "-"}</bdi></span>
                     </div>
                 </div>
             </div>
@@ -1720,7 +1787,8 @@ window.renderCloudReceivedConfigs = function() {
                 </button>
             </div>
         </div>
-    `).join("");
+    `; }).join("") + (bases.length > 8 ? `
+        <button type="button" class="mv-btn" style="align-self:center" onclick="window._cloudGroupsAll=!window._cloudGroupsAll;window.renderCloudReceivedConfigs()">${showAll ? 'نمایش کمتر' : `همه (${String(bases.length).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[+d])})`}</button>` : '');
 };
 
 window.renameCloudGroup = function(groupId) {
@@ -2021,7 +2089,7 @@ window.callZeusProxy = async function callZeusProxy(acc, endpoint, method = 'GET
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             workerUrl: acc.url,
-            password: 'Admin123!',
+            password: acc.zeusPassword || 'Admin123!',
             endpoint,
             method,
             body
@@ -2266,7 +2334,61 @@ window.zeusCopyStatus = function(username) {
     const statusUrl = `${window._zeusActiveAcc.url}/status/${encodeURIComponent(username)}`;
     navigator.clipboard.writeText(statusUrl).then(() => { toast("لینک صفحه وضعیت کپی شد"); });
 };
+// «ورود به پنل وب»: the panel's address and password. A panel installed before 1.2.5 still has
+// the old fixed password, and every config it hands out names its host — one button gives it its own.
+function paintZeusLogin(acc) {
+    const url = document.getElementById("zeus-web-url");
+    if (!url) return;
+    const own = !!acc.zeusPassword;
+    url.textContent = acc.url || "";
+    document.getElementById("zeus-web-pass").textContent = own ? "••••••••" : "•••••••• (رمز پیش‌فرض قدیمی)";
+    const note = document.getElementById("zeus-web-note");
+    note.textContent = own ? "" : "این پنل هنوز رمز پیش‌فرض همگانی را دارد؛ هر کسی که یکی از کانفیگ‌هایش را داشته باشد نشانی پنل را هم دارد و می‌تواند وارد آن شود.";
+    note.classList.toggle("hidden", own);
+    document.getElementById("zeus-web-rotate").classList.toggle("hidden", own);
+}
+
+window.copyZeusLogin = async function(kind) {
+    const acc = window._zeusActiveAcc || {};
+    const text = kind === "url" ? (acc.url || "") : (acc.zeusPassword || "Admin123!");
+    try {
+        await navigator.clipboard.writeText(text);
+        toast(kind === "url" ? "نشانی پنل کپی شد" : "رمز پنل کپی شد");
+    } catch (e) {
+        toast("کپی نشد: " + e.message);
+    }
+};
+
+window.rotateZeusPassword = async function(btn) {
+    const acc = window._zeusActiveAcc;
+    if (!acc || !acc.url) return;
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "در حال ساختن رمز تازه…";
+    try {
+        const res = await fetch("/api/cloudflare/zeus/rotate-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workerUrl: acc.url, password: acc.zeusPassword || "Admin123!", email: acc.email || "", token: acc.token })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || !d.zeusPassword) throw new Error(d.error || ("HTTP " + res.status));
+        const accounts = loadCloudAccounts();
+        const a = accounts.find(x => x.id === acc.id);
+        if (a) { a.zeusPassword = d.zeusPassword; PersistentStorage.setItem("cf_accounts", JSON.stringify(accounts)); }
+        acc.zeusPassword = d.zeusPassword;
+        paintZeusLogin(acc);
+        toast(d.saved ? "رمز اختصاصی پنل ساخته و ذخیره شد" : "رمز عوض شد و اینجا ذخیره شد، ولی در فهرست پنل‌های حساب نوشته نشد");
+    } catch (e) {
+        toast("رمز عوض نشد: " + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = label;
+    }
+};
+
 window.loadZeusSettings = async function(acc) {
+    paintZeusLogin(acc);
     document.getElementById("zeus-settings-loading").classList.remove("hidden");
     try {
         const data = await callZeusProxy(acc, '/api/proxy-ip', 'GET');
@@ -2565,7 +2687,9 @@ window.deployEdgeWorker = async function(btn, accountId) {
                 token: acc.token,
                 workerName: workerName,
                 subdomain: subdomain,
-                proxyIp: acc.edgeProxyIp || ''
+                proxyIp: acc.edgeProxyIp || '',
+                existingUrl: acc.edgeUrl || '',
+                existingUuid: acc.edgeUuid || ''
             })
         });
         const data = await res.json();

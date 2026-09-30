@@ -489,9 +489,13 @@ async function disableSystemWide() {
     // TUN comes down FIRST. It holds the machine's default route, and leaving it up while
     // the resolver behind it disappears is the same "no internet, no obvious cause" state
     // the DNS half is careful to avoid.
+    // Only the split tunnel this switch builds (startSmartTunnel): any other tunnel on the
+    // adapter — a V2Ray full tunnel, the GitHub Tunnel — belongs to the feature that started it,
+    // and this switch reported it «already running» rather than claiming it.
     try {
         const tun = require('./tun-manager');
-        if (tun.isRunning()) tun.stopTun(() => {});
+        const cur = tun.currentTunnel();
+        if (cur && cur.mode === 'smart' && cur.engine === 'xray.exe') await tun.stopTunAsync(() => {}, 'dedicated DNS off');
     } catch (e) { /* never block the DNS restore below */ }
 
     // Only stop the proxy if THIS switch started it. A connection the user made themselves

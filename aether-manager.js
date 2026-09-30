@@ -710,15 +710,52 @@ function pushLog(line) {
  * @param onLog  (text) => void            raw core-log line
  * @param onStage (stateObject) => void    structured stage change
  */
+/**
+ * A start that throws before the engine is up (invalid settings, a missing core) used to leave the
+ * page on «آمادهٔ اتصال» with the reason in a toast that vanished. The failure stays now, with what
+ * to do about it, until the next connect (Android 1.2.36 › ۵, the tunnels page).
+ */
+let startingSession = 0;
 async function startAether(opts, onLog, onStage, onDebug) {
+    const before = sessionId;
+    try { return await startAetherInner(opts, onLog, onStage, onDebug); }
+    catch (e) {
+        if (startingSession > before && sessionId === startingSession && !aetherProcess) {
+            const msg = String(e && e.message || e);
+            const lines = msg.split(/\r?\n/);
+            currentState = {
+                running: false, connected: false, stage: 'failed', stageFa: lines[0].slice(0, 200),
+                protocol: (opts && opts.protocol) || 'masque', socks: `127.0.0.1:${(opts && opts.socksPort) || SOCKS_PORT}`,
+                error: msg,
+                hint: /aether\.exe|پوشه core/.test(msg) ? 'فایل موتور نیست — برنامه را دوباره نصب کنید یا از «استور» هسته را نصب کنید.'
+                    : /تنظیمات نامعتبر/.test(msg) ? 'تنظیمات همین صفحه را بررسی کنید: ' + lines.slice(1).map((l) => l.replace(/^\s*•\s*/, '')).join(' · ')
+                        : 'دوباره «اتصال» را بزنید؛ اگر باز نشد موتور دیگری را امتحان کنید.',
+            };
+            if (onStage) { try { onStage(Object.assign({}, currentState)); } catch (x) { /* a page */ } }
+        }
+        throw e;
+    }
+}
+
+async function startAetherInner(opts, onLog, onStage, onDebug) {
     stopAether();
 
     // Claim ownership of the module state. Anything still in flight from the previous run
     // now carries a stale id and is ignored.
     const mySession = ++sessionId;
+    startingSession = mySession;
     const owns = () => sessionId === mySession;
 
-    const o = opts || {};
+    const o = Object.assign({}, opts || {});
+    // Which family the engine scans for endpoints (cf-family.js › warpScanFamily): the user's own
+    // v6/both stands; otherwise both whenever this machine has an IPv6 route. Never v6 alone on
+    // the CDN's verdict — on the network where Cloudflare's CDN IPv4 carried nothing (2026-09-28)
+    // WARP over IPv4 still worked, and both lets the engine use whichever answers.
+    try {
+        const fam = await require('./cf-family').warpScanFamily(o.ip);
+        if (fam !== (o.ip || 'v4')) console.log(`[WARP] خانوادهٔ آی‌پی: ${o.ip || 'v4'} ← ${fam} (مسیر IPv6 هست)`);
+        o.ip = fam;
+    } catch (e) { /* keep the stored choice */ }
 
     // Validate BEFORE anything is spawned or any state is claimed. A configuration error that
     // surfaces after the engine is running costs the user a full scan to find out, and can

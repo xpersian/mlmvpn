@@ -8,6 +8,7 @@
   <!-- Appearance (dark/light, transparency, motion) is decided here, before the first
        paint. The server has already injected the saved state above this line. -->
   <script src="ui/appearance-boot.js"></script>
+  <script src="ui/safe-json.js"></script>
   <link rel="stylesheet" href="assets/phosphor/regular/style.css" />
   <link rel="stylesheet" href="assets/phosphor/bold/style.css" />
   <link rel="stylesheet" href="assets/phosphor/fill/style.css" />
@@ -1152,6 +1153,7 @@
           </div>
           <div id="ls-cloud" style="display: none; flex-direction: column; gap: 12px; height: 100%;"></div>
           <div id="ls-openvpn" style="display: none; flex-direction: column; gap: 12px; height: 100%;"></div>
+          <div id="ls-arena" style="display: none; flex-direction: column; height: 100%;"></div>
           <div id="ls-gst" style="display: none; flex-direction: column; gap: 12px; height: 100%;"></div>
           <div id="ls-vodi" style="display: none; flex-direction: column; gap: 12px; height: 100%;"></div>
           <!-- min-height:0 is what actually lets this scroll: without it a flex child
@@ -1386,17 +1388,9 @@
         </div>
       </button>
 
-      <!-- Panel Status Lights -->
-      <div id="panel-status-lights" style="display: flex; gap: 8px; align-items: center; margin-right: 4px;">
-        <div id="light-bpb" data-tooltip="شما هیچ اکانت کلادفلری متصل نکرده اید"
-          style="width: 10px; height: 10px; border-radius: 50%; background: var(--mv-fill-3); transition: background 0.3s; cursor: help; box-shadow: 0 0 2px rgba(0,0,0,0.5);">
-        </div>
-        <div id="light-edge" data-tooltip="شما هیچ اکانت کلادفلری متصل نکرده اید"
-          style="width: 10px; height: 10px; border-radius: 50%; background: var(--mv-fill-3); transition: background 0.3s; cursor: help; box-shadow: 0 0 2px rgba(0,0,0,0.5);">
-        </div>
-        <div id="light-zeus" data-tooltip="شما هیچ اکانت کلادفلری متصل نکرده اید"
-          style="width: 10px; height: 10px; border-radius: 50%; background: var(--mv-fill-3); transition: background 0.3s; cursor: help; box-shadow: 0 0 2px rgba(0,0,0,0.5);">
-        </div>
+      <!-- Panel Status Lights — one per panel of the Cloud window, drawn by updatePanelStatusLights() -->
+      <div id="panel-status-lights" role="button" tabindex="0" aria-label="وضعیت پنل‌های ابری"
+        style="display: flex; gap: 8px; align-items: center; margin-right: 4px; cursor: pointer;">
       </div>
 
       <div id="footer-progress-container" style="
@@ -1745,6 +1739,7 @@
 
 
 
+  <script src="cf-uri.js"></script>
   <script src="persistent-storage.js"></script>
   <!-- Design-system runtime: appearance, prefs, applyTheme(), toast() banners. Before the
        panels, so everything they call at init already has its new behaviour. -->
@@ -1799,6 +1794,10 @@
   <script>safeInit("initGatewayModule");</script>
   <script src="components/sni.js"></script>
   <script>safeInit("initSniModule");</script>
+  <script src="components/cloud-panels.js"></script>
+  <script src="components/cloud-usage.js"></script>
+  <script src="components/arena.js"></script>
+  <script>safeInit("initArenaModule");</script>
   <script src="components/cloud.js?v=1782083082302"></script>
   <script>safeInit("initCloudModule");</script>
   <script src="components/sanction.js"></script>
@@ -1813,6 +1812,7 @@
   <script src="components/gst-network.js"></script>
   <script src="components/gst-wizard.js"></script>
   <script src="components/gst-backup.js"></script>
+  <script src="components/openvpn-profiles.js"></script>
   <script src="components/openvpn.js"></script>
   <script src="components/gst.js"></script>
   <script>safeInit("initOpenVpnModule");</script>
@@ -1820,6 +1820,13 @@
   <script src="components/vodi.js"></script>
   <script>safeInit("initVodiModule");</script>
   <script src="components/route-sheet.js"></script>
+  <!-- گیت‌هاب تانل: the kit pieces first, then one file per part, then the window itself. -->
+  <script src="components/gt-ui.js"></script>
+  <script src="components/gt-session.js"></script>
+  <script src="components/gt-accounts.js"></script>
+  <script src="components/gt-route.js"></script>
+  <script src="components/gt-exit.js"></script>
+  <script src="components/gt-broker.js"></script>
   <script src="components/github-tunnel.js"></script>
   <script>safeInit("initGithubTunnelModule");</script>
   <script src="components/aether.js"></script>
@@ -2036,6 +2043,22 @@
           <i class="ph-bold ph-spinner animate-spin text-3xl text-m3-primary"></i>
         </div>
         <form id="zeus-settings-form" onsubmit="handleZeusSettings(event)" class="space-y-4">
+          <div id="zeus-web-login" class="rounded-lg border border-m3-outline p-3 space-y-2">
+            <div class="text-xs font-medium text-m3-onSurface">ورود به پنل وب زئوس</div>
+            <div class="flex items-center gap-2">
+              <span id="zeus-web-url" dir="ltr" class="flex-1 min-w-0 truncate text-xs text-m3-onSurfaceVariant"></span>
+              <button type="button" onclick="copyZeusLogin('url')"
+                class="px-2 py-1 border border-m3-outline rounded-md text-xs text-m3-onSurface hover:border-m3-primary transition-colors">کپی نشانی</button>
+            </div>
+            <div class="flex items-center gap-2">
+              <span id="zeus-web-pass" dir="ltr" class="flex-1 min-w-0 truncate text-xs text-m3-onSurfaceVariant">••••••••</span>
+              <button type="button" onclick="copyZeusLogin('pass')"
+                class="px-2 py-1 border border-m3-outline rounded-md text-xs text-m3-onSurface hover:border-m3-primary transition-colors">کپی رمز</button>
+            </div>
+            <div id="zeus-web-note" class="hidden text-xs text-m3-onSurfaceVariant leading-6"></div>
+            <button type="button" id="zeus-web-rotate" onclick="rotateZeusPassword(this)"
+              class="hidden w-full px-3 py-2 border border-m3-outline rounded-lg text-xs font-bold text-m3-onSurface hover:border-m3-primary transition-colors">ساختن رمز اختصاصی برای این پنل</button>
+          </div>
           <div>
             <label class="block text-xs font-medium text-m3-onSurfaceVariant mb-1">Proxy IP (دور زدن کلودفلر)</label>
             <input type="text" id="zeus-set-proxy" required dir="ltr"

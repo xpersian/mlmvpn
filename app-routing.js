@@ -28,7 +28,7 @@ const MODES = ['all', 'allow', 'bypass'];
 
 // Never routable by the user: every engine the app runs, and the app itself.
 const RESERVED = new Set([
-    'xray.exe', 'sing-box.exe', 'aether.exe', 'gst.exe', 'tailscaled.exe', 'tailscale.exe',
+    'xray.exe', 'sing-box.exe', 'aether.exe', 'gst.exe', 'tailscaled.exe', 'tailscale.exe', 'gtcore.exe',
     'mlm vpn.exe', 'electron.exe',
 ]);
 

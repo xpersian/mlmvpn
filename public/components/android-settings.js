@@ -1410,7 +1410,8 @@
                     if (!l || !l.newer) {
                         return section(null, emptyBlock('ph-fill ph-check-circle', 'نرم‌افزار شما به‌روز است.',
                             `نسخهٔ فعلی: <span dir="ltr">${esc(u.currentVersion)}</span><br>آخرین بررسی: ${when(u.lastCheckAt)}${l ? `<br>آخرین نسخهٔ منتشرشده برای ویندوز: <span dir="ltr">${esc(l.version)}</span>` : ''}`)
-                            + linkRow({ act: 'up-check', icon: 'ph-bold ph-arrow-clockwise', tint: 'var(--mv-blue)', title: 'بررسی دوباره', noChevron: true }), null, 'is-wide');
+                            + linkRow({ act: 'up-check', icon: 'ph-bold ph-arrow-clockwise', tint: 'var(--mv-blue)', title: 'بررسی دوباره', noChevron: true })
+                            + linkRow({ act: 'page', arg: 'notes', icon: 'ph-fill ph-list-bullets', tint: 'var(--mv-indigo)', title: 'آخرین تغییرات', sub: 'کامل‌ترین توضیح آخرین انتشار عمومی' }), null, 'is-wide');
                     }
                     const dl = u.download;
                     const ready = u.downloaded && u.downloaded.version === l.version;
@@ -1423,6 +1424,39 @@
                             + (dl && dl.error ? note('دانلود نشد: ' + esc(dl.error), 'danger') : '')
                             + (l.asset ? `<div class="mv-form-row as-btn-row"><button type="button" class="mv-btn mv-btn--primary" data-as="${ready ? 'up-install' : 'up-download'}"${dl && dl.running ? ' disabled' : ''}>${dl && dl.running ? 'در حال دانلود…' : ready ? 'همین حالا نصب کن' : 'دانلود'}</button></div>` : ''))
                         + (l.body ? section('تازه‌های این نسخه', `<div class="mv-form-row as-notes" dir="auto">${esc(l.body).replace(/\n/g, '<br>')}</div>`, null, 'is-wide') : '');
+                },
+            },
+            // «آخرین تغییرات» (Android 1.2.36 › ۶): the latest PUBLIC release's notes, fetched fresh
+            // every time (never a draft or pre-release — /releases/latest excludes both), in simple
+            // Markdown. Offline, the in-app changelog of this version stands in.
+            notes: {
+                title: () => 'آخرین تغییرات',
+                open() {
+                    about.notes = null; repaint('about');
+                    api('/api/update/latest-notes').then((d) => { about.notes = d; repaint('about'); });
+                },
+                html() {
+                    const d = about.notes;
+                    if (!d) return section(null, spinnerBlock('در حال گرفتن توضیح آخرین انتشار…'), null, 'is-wide');
+                    const md = (t) => esc(t).split(/\r?\n/).map((line) => {
+                        const b = (s) => s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code dir="ltr">$1</code>');
+                        if (/^#{1,6}\s/.test(line)) return `<h4 style="margin:12px 0 4px">${b(line.replace(/^#{1,6}\s*/, ''))}</h4>`;
+                        if (/^\s*[-*•]\s/.test(line)) return `<div style="padding-inline-start:14px">• ${b(line.replace(/^\s*[-*•]\s*/, ''))}</div>`;
+                        if (/^\s*-{3,}\s*$/.test(line)) return '<hr style="opacity:.2">';
+                        return line.trim() ? `<div>${b(line)}</div>` : '<div style="height:6px"></div>';
+                    }).join('');
+                    if (d.body) {
+                        return section(null, `<div class="mv-form-row is-stack" dir="auto"><b>${esc(d.name || d.tag || '')}</b><small>${d.published ? new Date(d.published).toLocaleString('fa-IR') : ''}</small></div>`
+                            + `<div class="mv-form-row is-stack as-notes" dir="auto" style="line-height:1.9">${md(d.body)}</div>`, null, 'is-wide');
+                    }
+                    // Offline: this version's own list.
+                    let local = '';
+                    try {
+                        const c = ((typeof CHANGELOG !== 'undefined' && CHANGELOG) || window.CHANGELOG || [])[0];
+                        if (c) local = `<b>نسخهٔ ${esc(c.version)}</b>` + c.sections.map((s) => s.items.map((it) => `<div style="padding-inline-start:14px">• ${esc(typeof it === 'string' ? it : it.text)}</div>`).join('')).join('');
+                    } catch (e) { local = ''; }
+                    return section(null, note('گیت‌هاب در دسترس نبود' + (d.error ? ` (${esc(d.error)})` : '') + ' — تغییرات همین نسخه از فهرست داخل برنامه:', 'warn')
+                        + `<div class="mv-form-row is-stack" dir="auto" style="line-height:1.9">${local || 'فهرست داخلی خوانده نشد.'}</div>`, null, 'is-wide');
                 },
             },
             crash: {

@@ -217,7 +217,11 @@
       '</div>';
     el.querySelector('.mv-banner-text').textContent = text;
     host.insertBefore(el, host.firstChild);
-    while (host.children.length > MAX_BANNERS) dismiss(host.lastChild);
+    // Count only the banners that are staying. A dismissed one keeps its place for its 200 ms
+    // exit, and dismissing it again does nothing — so counting children froze the whole window
+    // in an endless loop the moment a fourth banner arrived while three were showing.
+    var staying = Array.prototype.filter.call(host.children, function (c) { return !c.__mvLeaving; });
+    while (staying.length > MAX_BANNERS) dismiss(staying.pop());
 
     // Errors and warnings are worth finding again later: the Notification Centre keeps them.
     if ((tone.tint === 'var(--mv-red)' || tone.tint === 'var(--mv-orange)') && typeof MV_bannerHook === 'function') {

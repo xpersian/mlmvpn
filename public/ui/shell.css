@@ -519,8 +519,10 @@ button.mv-mb-si:hover { background: var(--mv-fill-2); }
 /* Status items moved in from the old status bar. */
 .mv-menubar #live-speed { font-size: 11.5px !important; gap: 8px !important; color: var(--mv-label-2) !important; }
 .mv-menubar #live-speed > span:first-child { display: none; }
-.mv-menubar #panel-status-lights { gap: 5px !important; margin: 0 6px !important; padding-inline: 4px; }
-.mv-menubar #panel-status-lights > div { width: 7px !important; height: 7px !important; }
+/* Nine lamps now, one per panel of the Cloud window — packed a little tighter than the old three. */
+.mv-menubar #panel-status-lights { gap: 4px !important; margin: 0 6px !important; padding-inline: 5px; height: 22px; border-radius: 5px; }
+.mv-menubar #panel-status-lights:hover { background: var(--mv-fill-2); }
+.mv-menubar #panel-status-lights > div { width: 7px !important; height: 7px !important; flex: none; }
 .mv-menubar #btn-notifications { margin: 0 !important; width: 28px; height: 22px; border-radius: 5px !important; }
 .mv-menubar #btn-notifications:hover { background: var(--mv-fill-2) !important; }
 .mv-menubar #btn-notifications i { color: var(--mv-label) !important; font-size: 15px !important; }
@@ -731,7 +733,12 @@ html[data-dock-magnify="off"] .mv-dock-item .mv-ic { transform: none !important;
 .mv-wg-traffic b { font-size: 17px; font-weight: 700; }
 .mv-wg-spark { display: block; width: 100%; height: 34px; margin-top: 8px; }
 .mv-lampdot { display: inline-block; width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--mv-gray); }
-.mv-wg-cloud-row { display: grid; grid-template-columns: auto auto 1fr; align-items: center; gap: 4px 8px; padding-block: 3px; font-size: 12px; }
+/* Nine panels: three columns of lamp + name (the full sentence is each row's tooltip), then a legend. */
+.mv-wg-cloud-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 10px; margin-top: 4px; }
+.mv-wg-cloud-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 6px; padding-block: 3px; font-size: 12px; min-width: 0; }
+.mv-wg-cloud-row > b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mv-wg-cloud-legend { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 6px; font-size: 11px; color: var(--mv-label-2); }
+.mv-wg-cloud-legend > .mv-wg-cloud-row { display: inline-flex; gap: 5px; padding: 0; font-size: 11px; }
 .mv-wg-cloud-row > span:last-child { color: var(--mv-label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mv-wg-cloud-row.is-ok .mv-lampdot { background: var(--mv-green); box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--mv-green) 28%, transparent); }
 .mv-wg-cloud-row.is-warn .mv-lampdot { background: var(--mv-yellow); box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--mv-yellow) 28%, transparent); }

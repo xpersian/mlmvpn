@@ -1065,13 +1065,13 @@ function vodiRenderList() {
       ${gws.length === 0 ? `
         <div class="vodi-empty">
           هنوز سروری نساخته‌ای.<br>
-          با دکمه‌ی بالا، قدم‌به‌قدم یک پنل VodiWalker روی حساب Railway خودت دیپلوی کن.
+          با دکمه‌ی بالا، قدم‌به‌قدم یک پنل VodiWalker یا RVG روی حساب Railway خودت دیپلوی کن.
         </div>` :
         `<div class="vodi-card-grid">${gws.map(g => `
           <div class="vodi-card">
             <div class="vodi-card-top">
               <div style="min-width:0;">
-                <div class="vodi-card-name">${vodiEsc(g.name)}</div>
+                <div class="vodi-card-name">${vodiEsc(g.name)} <span class="vodi-tag">${vodiEsc(g.panelTitle || 'VodiWalker')}</span></div>
                 <div class="vodi-card-dom" title="${vodiEsc(g.domain)}">${vodiEsc(g.domain || '—')}</div>
               </div>
               <span class="vodi-badge">${vodiEsc(vodiRegionLabel(g.region))}</span>
@@ -1176,8 +1176,18 @@ function vodiRenderWizard() {
     if (w.step === 1) {
         inner = `
           <div class="vodi-step-title">۱ / ۶ — پیش‌نیاز و راهنما</div>
+          <div class="vodi-field">
+            <label>کدام پنل؟</label>
+            <select id="vodi-gw-panel" onchange="vodiState.wizard.panel = this.value; vodiRenderWizard()">
+              <option value="vodi" ${(w.panel || 'vodi') === 'vodi' ? 'selected' : ''}>VodiWalker — VLESS و XHTTP</option>
+              <option value="rvg" ${w.panel === 'rvg' ? 'selected' : ''}>RVG Gateway — VLESS و Trojan روی WS و XHTTP</option>
+            </select>
+            <div class="vodi-hint">${w.panel === 'rvg'
+                ? 'پنل RVG ساختهٔ <b>codebox</b> (<code style="direction:ltr">arvin341az-glitch/RVG</code>). بدون هیچ تغییری، مستقیم از مخزن سازنده ساخته می‌شود؛ پس همیشه آخرین نسخهٔ او را دارید، و «بروزرسانی» در استور دوباره از همان مخزن می‌سازد.'
+                : 'پنل VodiWalker (<code style="direction:ltr">Vodiwalker/vodiwalker_panel</code>)، مستقیم از مخزن سازنده.'}</div>
+          </div>
           <div class="vodi-guide">
-            این ابزار پنل VLESS «VodiWalker» را به‌صورت خودکار روی حساب <b>Railway</b> خودت دیپلوی می‌کند
+            این ابزار پنل انتخاب‌شده را به‌صورت خودکار روی حساب <b>Railway</b> خودت دیپلوی می‌کند
             و بعد می‌توانی کاربران و کانفیگ‌ها را از همین‌جا بسازی و مدیریت کنی.
             <br><br>
             <b>پیش‌نیاز:</b> یک حساب Railway با پلن فعال و یک <b>API Token</b>.
@@ -1298,10 +1308,10 @@ function vodiRenderWizard() {
             <select id="vodi-gw-region">${regs}</select>
             <div class="vodi-hint">لوکیشن روی سرعت و آی‌پی خروجی اثر می‌گذارد.</div>
           </div>
-          <div class="vodi-field"><label>نام کاربری ادمین</label>
+          ${w.panel === 'rvg' ? '' : `<div class="vodi-field"><label>نام کاربری ادمین</label>
             <input id="vodi-gw-user" value="${vodiEsc(w.username || 'admin')}" placeholder="admin">
             <div class="vodi-hint">پنل با نام کاربری و رمز وارد می‌شود. اگر مطمئن نیستی، همین «admin» را نگه دار.</div>
-          </div>
+          </div>`}
           <div class="vodi-field"><label>رمز ادمین پنل</label>
             <input id="vodi-gw-pass" value="${vodiEsc(w.password || vodiRandomPass())}">
             <div class="vodi-hint">این رمز برای ورود به داشبورد پنل است. یک رمز امن برایت ساخته شد؛ می‌توانی همین را نگه داری یا عوض کنی.</div>
@@ -1631,7 +1641,7 @@ async function vodiDoDeploy() {
             signal: ctrl.signal,
             body: JSON.stringify({
                 accountId: w.accountId, name: w.name, region: w.region,
-                adminUsername: w.username, adminPassword: w.password,
+                adminUsername: w.username, adminPassword: w.password, panel: w.panel || 'vodi',
             }),
         });
         if (run !== vodiState.deployRun || !vodiState.wizard) return;   // cancelled meanwhile

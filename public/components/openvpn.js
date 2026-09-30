@@ -2,28 +2,38 @@
 //
 // The SAME window «گیت‌وی MLM» is, on a different engine. The user asked for exactly that —
 // *«این بخش باید دقیقا همون امکانات گیت وی رو داشته باشه، همون سرورها و دقیقا تمام امکاناتش،
-// فقط با موتور OPENVPN سرورهاش باید وصل بشه»* — so this panel is derived from that one rather
-// than written beside it: same sections, same two lists, same sweeps, same words. A capability
-// that exists there and not here is a bug, and tests/openvpn/parity.test.js is where it fails.
+// فقط با موتور OPENVPN سرورهاش باید وصل بشه»* — so every capability of that window lives here too,
+// and tests/openvpn/parity.test.js is where a missing one fails.
 //
-// What is genuinely different, and why:
+// REDESIGNED 2026-10-01 («کلا سیستم OPEN VPN باید از اول UIش طراحی بشه، هماهنگ با مک او اس جدید»).
+// The window had grown three sources of servers — the public VPN Gate relays, TunnelBear's 47
+// countries, and the user's own .ovpn files — and each had its own idea of how to connect: the
+// power button only knew VPN Gate, and the other two pages were walls of blue «اتصال» buttons.
+// Now there is ONE model for all three:
 //
-//   * ONE ARCHIVE, TWO CURATIONS. The relay rows come from the gateway's archive — one file,
-//     one refresh, 355 relays accumulated. Everything else is this engine's own: «فهرست من»,
-//     the deletions, the selected relay and every measurement. The user never has to know the
-//     rows are shared (*«کاربر نیاز نیست اصلا بفهمه که آرشیو ها یکی هستند»*), and the verdicts
-//     MUST NOT be, because the two protocols disagree about the same relay — measured below.
-//   * «تست واقعی» IS A REAL OPENVPN CONNECTION. Not a SoftEther handshake: a full dial to
-//     «Initialization Sequence Completed» through this engine's own core, on a throwaway
-//     adapter. It is the only test whose pass means «this will connect».
-//   * THE FRONT IS PART OF THE PATH. Measured on four official relays in one minute:
-//     SoftEther connected to all four (1.3–3.0 s) while OpenVPN, raw, stalled on all four at
-//     «TLS key negotiation failed». Through Psiphon, the same four connected in 6.8–8.3 s.
-//     The relays are fine and so is the profile — OpenVPN's control channel is simply
-//     recognisable on this line, where SoftEther's looks like an HTTPS POST. So this panel has
-//     a front picker where the gateway has a UDP switch, and «خودکار» is the default.
+//   * CHOOSE, THEN CONNECT. A row in any of the three lists is chosen (accent, like a selected
+//     item in Finder); the power button on «اتصال» — or the compact one in the title band on
+//     every other page — connects to whatever is chosen. «مقصد اتصال» on the home page says which
+//     source and which server that is, and switches source in one click.
+//   * The live connection is GREEN, the chosen row is ACCENT — never the same look (page kit K3).
+//   * VPN Gate is a real macOS table (K4): sortable columns, the chosen row highlighted, the
+//     columns that matter least folding away on a narrow window.
+//   * Accounts are added and edited in a SHEET over the window (K8), not in fields that the
+//     4-second status poll could wipe.
 //
-// Renders into #ls-openvpn. Talks to /api/openvpn/*.
+// What is genuinely this engine's own, and why (unchanged):
+//
+//   * ONE ARCHIVE, TWO CURATIONS. The relay rows come from the gateway's archive; «فهرست من», the
+//     deletions, the selection and every measurement are this engine's own, because the two
+//     protocols disagree about the same relay.
+//   * «تست واقعی» IS A REAL OPENVPN CONNECTION, to «Initialization Sequence Completed», on a
+//     throwaway adapter.
+//   * DIRECT, ALWAYS (the user's rule, 2026-09-30 — «مانند اندروید»). A TCP relay is dialled through
+//     a local split relay that connects to it directly and breaks the first records into uneven
+//     pieces (openvpn-manager › directPath). There is no front and no picker.
+//
+// Renders into #ls-openvpn. Talks to /api/openvpn/*. The TunnelBear, own-profile and account pages
+// are components/openvpn-profiles.js (window.OvProfiles), mounted into this frame.
 
 (function () {
     'use strict';
@@ -96,6 +106,14 @@
         return fa(`${p(Math.floor(t / 3600))}:${p(Math.floor((t % 3600) / 60))}:${p(t % 60)}`);
     }
 
+    /** A byte count in the unit a person reads: کیلوبایت up to a megabyte, then مگابایت, then گیگابایت. */
+    function bytesText(n) {
+        const b = Number(n) || 0;
+        if (b < 1048576) return fa(Math.round(b / 1024)) + ' کیلوبایت';
+        if (b < 1073741824) return fa((b / 1048576).toFixed(1).replace(/\.0$/, '')) + ' مگابایت';
+        return fa((b / 1073741824).toFixed(2).replace(/0$/, '').replace(/\.0$/, '')) + ' گیگابایت';
+    }
+
     /** VPN Gate publishes uptime in milliseconds. Days is the only useful unit. */
     function uptimeText(ms) {
         if (!ms) return 'نامشخص';
@@ -146,7 +164,8 @@
     // ── sorting ────────────────────────────────────────────────────────────
     //
     // The same seven modes as Android, with the same descriptions — a user who learned this
-    // screen on their phone must not have to learn it again here.
+    // screen on their phone must not have to learn it again here. Five of them are also the
+    // table's column headers: a click there is the same choice as a row on «مرتب‌سازی».
 
     const SORTS = [
         { id: 'verified', label: 'تست‌شده‌ها اول', detail: 'سرورهایی که «تست واقعی» را رد کرده‌اند بالا می‌آیند. تست‌نشده‌ها بالاتر از ردشده‌ها می‌مانند — نبودِ تست یک خبر بد نیست.' },
@@ -195,12 +214,12 @@
         kept: [], hidden: [],
         pings: {},           // host -> ms, 0 when it did not answer
         probes: {},          // host -> { ok, ms, reason, at }
-        selected: null,
+        selected: null,      // the chosen VPN Gate relay (remembered by the server)
         suggested: null,
-        // Which front carries the tunnel: 'auto' | 'none' | a live SOCKS port. Where the gateway
-        // keeps a UDP switch — see the header for why this engine needs a carrier at all.
-        front: 'auto',
-        fronts: [],          // [{ port, name }] the engines that are up right now
+
+        // What the power button connects to: a VPN Gate relay (its host is `selected`), a
+        // TunnelBear country, or one of the user's own profiles (a profile id).
+        target: loadTarget(),
 
         scope: 'mine',       // 'mine' | 'archive'
         sort: 'verified',
@@ -220,6 +239,19 @@
     const $ = (id) => document.getElementById(id);
     const has = (arr, v) => arr.indexOf(v) >= 0;
     const without = (arr, v) => arr.filter(x => x !== v);
+    const status = () => (st.payload && st.payload.status) || {};
+
+    function loadTarget() {
+        try {
+            const raw = (window.PersistentStorage || localStorage).getItem('ov-target');
+            const t = raw ? JSON.parse(raw) : null;
+            if (t && (t.kind === 'gate' || t.kind === 'bear' || t.kind === 'own')) return { kind: t.kind, id: t.id || null };
+        } catch (e) { /* the default below */ }
+        return { kind: 'gate', id: null };
+    }
+    function saveTarget() {
+        try { (window.PersistentStorage || localStorage).setItem('ov-target', JSON.stringify(st.target)); } catch (e) { /* this session only */ }
+    }
 
     // ── style ──────────────────────────────────────────────────────────────
 
@@ -240,117 +272,198 @@
      A scripted .click() still worked, which is why it passed review.
 
      position:relative alone creates no stacking context, so the nav competes with the bar
-     directly and wins. The snack below is positioned against this element and is unaffected. */
+     directly and wins. The snack and the sheet below are positioned against this element. */
   #ov-wrap { position:relative; flex:1 1 auto; min-height:0; color:var(--mv-label); }
-  #ov-wrap code { font-family:var(--mv-font-latin, ui-monospace), monospace; font-size:.92em; }
-  #ov-wrap .ov-num { font-family:var(--mv-font-tech, ui-monospace), monospace; font-variant-numeric:tabular-nums; font-size:11.5px; }
-  #ov-wrap .ov-log {
-    margin:0; width:100%; max-height:420px; overflow:auto;
-    font-family:var(--mv-font-latin, ui-monospace), monospace; font-size:11px; line-height:1.7;
-    white-space:pre-wrap; word-break:break-word; text-align:left; color:var(--mv-label-2);
-  }
+  #ov-wrap code, #ov-wrap .ov-host { font-family:var(--mv-font-tech); font-size:.92em; direction:ltr; unicode-bidi:isolate; }
+  #ov-wrap .ov-num { font-family:var(--mv-font-tech); font-variant-numeric:tabular-nums; }
+  #ov-wrap .ov-dim { color:var(--mv-label-2); }
+  /* A hairline around every flag: on a light row Japan's white field vanished and the flag read
+     as a bare red dot. */
+  #ov-wrap .mv-flag { box-shadow:0 0 0 .5px color-mix(in srgb, var(--mv-label) 22%, transparent); }
 
-  /* search + chips + toolbar, all on one band above the list */
-  #ov-wrap .ov-tools { display:flex; flex-direction:column; gap:9px; padding:2px 0 4px; }
-  #ov-wrap .ov-search { display:flex; align-items:center; gap:7px; height:32px; padding:0 10px;
-    border-radius:9px; background:var(--mv-fill-2); }
-  #ov-wrap .ov-search > i { font-size:14px; color:var(--mv-label-3); flex:none; }
-  #ov-wrap .ov-search > input { flex:1 1 auto; min-width:0; border:0; background:none; outline:none;
-    color:var(--mv-label); font:inherit; font-size:12.5px; }
-  #ov-wrap .ov-search > button { flex:none; border:0; background:none; color:var(--mv-label-3);
-    cursor:pointer; font-size:13px; padding:2px; }
+  /* the sidebar: a count at the end of three items. A <b>, and the label keeps its ellipsis
+     through :last-of-type — page-kit clips «the last child span», which the label no longer is. */
+  #ov-wrap .mv-side-item > span:last-of-type:not(.mv-side-tile) { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  #ov-wrap .ov-count { flex:none; margin-inline-start:auto; font-size:11px; font-weight:600; color:var(--mv-label-3); font-family:var(--mv-font-tech); }
+  #ov-wrap .mv-side-item.active .ov-count { color:inherit; opacity:.75; }
 
-  #ov-wrap .ov-row-1 { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-  #ov-wrap .ov-chips { display:inline-flex; padding:2px; border-radius:9px; background:var(--mv-fill-2); }
-  #ov-wrap .ov-chip { border:0; background:none; cursor:pointer; border-radius:7px; padding:4px 11px;
-    font:inherit; font-size:12px; font-weight:600; color:var(--mv-label-2); white-space:nowrap; }
-  #ov-wrap .ov-chip.is-on { background:var(--mv-accent); color:#fff; }
-  #ov-wrap .ov-tb { display:flex; align-items:center; gap:6px; margin-inline-start:auto; flex-wrap:wrap; }
-  #ov-wrap .ov-tb button { display:inline-flex; align-items:center; gap:5px; height:28px; padding:0 10px;
-    border:0; border-radius:8px; background:var(--mv-fill-2); color:var(--mv-label); cursor:pointer;
-    font:inherit; font-size:12px; font-weight:600; white-space:nowrap; }
-  #ov-wrap .ov-tb button:disabled { opacity:.45; cursor:default; }
-  #ov-wrap .ov-tb button.is-on { background:var(--mv-accent); color:#fff; }
-  #ov-wrap .ov-tb button.is-stop { background:color-mix(in srgb, var(--mv-red) 20%, transparent); color:var(--mv-red-ink, var(--mv-red)); }
+  /* ── status pills ── */
+  #ov-wrap .ov-pill { display:inline-flex; align-items:center; height:20px; padding-inline:8px; border-radius:999px;
+    font-size:11px; font-weight:600; white-space:nowrap; background:var(--mv-fill-2); color:var(--mv-label-2); }
+  #ov-wrap .ov-pill.is-ok { background:color-mix(in srgb, var(--mv-green) 16%, transparent); color:var(--mv-green-ink); }
+  #ov-wrap .ov-pill.is-mid { background:color-mix(in srgb, var(--mv-yellow) 22%, transparent); color:var(--mv-orange-ink); }
+  #ov-wrap .ov-pill.is-slow { background:color-mix(in srgb, var(--mv-orange) 17%, transparent); color:var(--mv-orange-ink); }
+  #ov-wrap .ov-pill.is-bad { background:color-mix(in srgb, var(--mv-red) 14%, transparent); color:var(--mv-red-ink); }
+  #ov-wrap .ov-pill.is-tag { height:17px; padding-inline:6px; font-size:10px; }
 
-  /* the sweep's progress, in the band it belongs to */
-  #ov-wrap .ov-sweep { display:flex; align-items:center; gap:9px; font-size:11.5px; color:var(--mv-label-2); }
-  #ov-wrap .ov-sweep .ov-bar { flex:1 1 auto; height:5px; border-radius:3px; background:var(--mv-fill-2); overflow:hidden; }
-  #ov-wrap .ov-sweep .ov-bar > i { display:block; height:100%; background:var(--mv-accent); transition:width .25s ease-out; }
+  /* ── the page's own toolbar band: search + scope on one line, the actions under it ── */
+  #ov-wrap .ov-toolbar { display:flex; flex-direction:column; gap:10px; margin:0 0 12px; }
+  #ov-wrap .ov-bar1 { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  #ov-wrap .ov-bar1 > .mv-search { flex:1 1 240px; min-width:200px; }
+  #ov-wrap .ov-bar1 > .mv-search > .mv-field { width:100%; padding-inline-end:30px; }
+  #ov-wrap .ov-bar1 > .mv-search > button { position:absolute; inset-inline-end:6px; width:20px; height:20px; border:0; border-radius:50%;
+    display:grid; place-items:center; background:var(--mv-fill-2); color:var(--mv-label-2); font-size:10px; cursor:pointer; }
+  #ov-wrap .ov-tb { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  #ov-wrap .ov-tb > button, #ov-wrap .ov-tb > label {
+    position:relative; height:28px; display:inline-flex; align-items:center; gap:6px; padding:0 12px;
+    border:0; border-radius:999px; background:var(--mv-glass-btn); box-shadow:var(--mv-glass-btn-edge);
+    color:var(--mv-label); font:inherit; font-size:12.5px; white-space:nowrap; cursor:default;
+    transition:background var(--mv-d-1) var(--mv-ease-out); }
+  #ov-wrap .ov-tb > button > i, #ov-wrap .ov-tb > label > i { font-size:14px; color:var(--mv-label-2); }
+  #ov-wrap .ov-tb > button:hover:not(:disabled), #ov-wrap .ov-tb > label:hover { background:var(--mv-fill-2); }
+  #ov-wrap .ov-tb > button[aria-pressed="true"] { background:var(--mv-control); box-shadow:var(--mv-control-hair); font-weight:600; }
+  #ov-wrap .ov-tb > button[aria-pressed="true"] > i { color:var(--mv-accent); }
+  #ov-wrap .ov-tb > button:disabled { opacity:.42; }
+  #ov-wrap .ov-tb > .is-go { background:var(--mv-accent); color:var(--mv-on-accent); box-shadow:none; font-weight:600; }
+  #ov-wrap .ov-tb > .is-go > i { color:inherit; }
+  #ov-wrap .ov-tb > .is-go:hover:not(:disabled) { background:var(--mv-accent-2, var(--mv-accent)); }
+  #ov-wrap .ov-tb > .is-bad { color:var(--mv-red-ink); }
+  #ov-wrap .ov-tb > .is-bad > i { color:var(--mv-red); }
+  #ov-wrap .ov-tb > .is-stop { color:var(--mv-red-ink); background:color-mix(in srgb, var(--mv-red) 14%, transparent); box-shadow:none; }
+  #ov-wrap .ov-tb > .is-stop > i { color:var(--mv-red); }
+  #ov-wrap .ov-tb > .ov-tb-sep { width:1px; height:18px; margin:0 4px; background:var(--mv-sep); }
+  #ov-wrap .ov-tb > label > input[type=file] { position:absolute; inset:0; opacity:0; cursor:pointer; }
 
-  #ov-wrap .ov-summary { display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--mv-label-3); flex-wrap:wrap; }
-  #ov-wrap .ov-summary button { border:0; background:var(--mv-fill-2); color:var(--mv-label-2); cursor:pointer;
-    border-radius:7px; padding:2px 8px; font:inherit; font-size:11px; }
+  /* the sweep's progress */
+  #ov-wrap .ov-sweep { display:flex; align-items:center; gap:10px; padding:9px 14px; border-radius:12px;
+    background:var(--mv-group); box-shadow:inset 0 0 0 var(--mv-hl) var(--mv-group-edge); font-size:12px; color:var(--mv-label-2); }
+  #ov-wrap .ov-sweep > .mv-spin-ring { font-size:13px; color:var(--mv-accent); }
+  #ov-wrap .ov-sweep .ov-bar { flex:1 1 auto; height:6px; border-radius:3px; background:var(--mv-fill-2); overflow:hidden; }
+  #ov-wrap .ov-sweep .ov-bar > i { display:block; height:100%; border-radius:3px; background:var(--mv-accent); transition:width .25s ease-out; }
 
-  /* the list itself: a wide window is a wide list */
-  #ov-wrap #ov-servers { display:grid; gap:2px; grid-template-columns:repeat(auto-fill, minmax(330px, 1fr)); }
-  #ov-wrap #ov-servers > .mv-form-row + .mv-form-row::before { content:none; }
-  #ov-wrap .ov-srow { display:flex; align-items:center; gap:9px; width:100%; text-align:start;
-    border:0; background:none; color:inherit; font:inherit; cursor:pointer;
-    padding:8px 11px; border-radius:9px; }
-  #ov-wrap .ov-srow:hover { background:var(--mv-fill); }
-  #ov-wrap .ov-srow[disabled] { opacity:.5; cursor:default; }
-  #ov-wrap .ov-srow .ov-mark { flex:none; width:18px; font-size:15px; color:var(--mv-label-3); display:grid; place-items:center; }
-  #ov-wrap .ov-srow .ov-mark.is-on { color:var(--mv-accent); }
-  #ov-wrap .ov-srow .ov-txt { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:1px; }
-  #ov-wrap .ov-srow .ov-txt b { font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #ov-wrap .ov-srow .ov-txt small { font-size:10.5px; color:var(--mv-label-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #ov-wrap .ov-srow .ov-txt small.is-on { color:var(--mv-green-ink, var(--mv-green)); }
-  #ov-wrap .ov-srow .ov-end { flex:none; display:flex; align-items:center; gap:7px; }
-  #ov-wrap .ov-badge { font-size:10px; font-weight:700; padding:2px 7px; border-radius:7px;
-    background:var(--mv-fill-2); color:var(--mv-label-2); white-space:nowrap; }
-  #ov-wrap .ov-badge.is-ok { background:color-mix(in srgb, var(--mv-green) 18%, transparent); color:var(--mv-green-ink, var(--mv-green)); }
-  #ov-wrap .ov-badge.is-mid { background:color-mix(in srgb, var(--mv-yellow) 20%, transparent); color:var(--mv-yellow-ink, var(--mv-orange)); }
-  #ov-wrap .ov-badge.is-slow { background:color-mix(in srgb, var(--mv-orange) 18%, transparent); color:var(--mv-orange-ink, var(--mv-orange)); }
-  #ov-wrap .ov-badge.is-bad { background:color-mix(in srgb, var(--mv-red) 16%, transparent); color:var(--mv-red-ink, var(--mv-red)); }
-  #ov-wrap .ov-open { flex:none; border:0; background:none; color:var(--mv-label-3); cursor:pointer;
-    font-size:13px; padding:3px; border-radius:6px; }
-  #ov-wrap .ov-open:hover { color:var(--mv-label); background:var(--mv-fill-2); }
+  /* «انتخاب»: the bulk bar */
+  #ov-wrap .ov-bulk { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 8px 8px 14px; border-radius:12px;
+    background:color-mix(in srgb, var(--mv-accent) 10%, transparent); font-size:12.5px; }
+  #ov-wrap .ov-bulk > b { font-weight:700; }
+  #ov-wrap .ov-bulk > .ov-tb { margin-inline-start:auto; }
 
-  /* the bulk bar, when «انتخاب» is on */
-  #ov-wrap .ov-bulk { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
-    padding:9px 11px; border-radius:11px; background:var(--mv-fill-2); font-size:12px; }
-  #ov-wrap .ov-bulk b { font-weight:700; }
-  #ov-wrap .ov-bulk .ov-bulk-acts { display:flex; gap:6px; margin-inline-start:auto; flex-wrap:wrap; }
-  #ov-wrap .ov-bulk button { border:0; border-radius:8px; padding:5px 11px; cursor:pointer; font:inherit;
-    font-size:12px; font-weight:600; background:var(--mv-fill); color:var(--mv-label); }
-  #ov-wrap .ov-bulk button:disabled { opacity:.45; cursor:default; }
-  #ov-wrap .ov-bulk button.is-bad { background:color-mix(in srgb, var(--mv-red) 18%, transparent); color:var(--mv-red-ink, var(--mv-red)); }
+  #ov-wrap .ov-summary { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 4px; font-size:11.5px; color:var(--mv-label-2); }
+  #ov-wrap .ov-summary > button { border:0; border-radius:999px; padding:2px 9px; cursor:pointer; font:inherit; font-size:11px;
+    background:var(--mv-fill-2); color:var(--mv-label); }
+  #ov-wrap .ov-summary > button > i { font-size:10px; }
+
+  /* ── the VPN Gate table ── */
+  #ov-wrap .ov-tgroup { overflow:hidden; }
+  #ov-wrap .ov-table { table-layout:auto; }
+  #ov-wrap .ov-table th { position:sticky; top:0; background:var(--mv-group); z-index:1; }
+  #ov-wrap .ov-table th[data-sortcol] { cursor:pointer; }
+  #ov-wrap .ov-table th[data-sortcol]:hover { color:var(--mv-label); }
+  #ov-wrap .ov-table th.is-sorted { color:var(--mv-accent); }
+  #ov-wrap .ov-table th .ov-arrow { font-size:9px; margin-inline-start:3px; }
+  #ov-wrap .ov-table td { padding-block:7px; vertical-align:middle; }
+  #ov-wrap .ov-table td.ov-c-mark { width:22px; padding-inline:12px 0; }
+  #ov-wrap .ov-table td.ov-c-num { font-family:var(--mv-font-tech); font-variant-numeric:tabular-nums; color:var(--mv-label-2); }
+  #ov-wrap .ov-table td.ov-c-act { width:30px; padding-inline:0 8px; }
+  #ov-wrap .ov-table tr.ov-tr { cursor:default; }
+  #ov-wrap .ov-table tr.ov-tr:hover > td { background:var(--mv-fill); }
+  #ov-wrap .ov-table tr.ov-tr.is-sel > td { background:color-mix(in srgb, var(--mv-accent) 13%, transparent); }
+  #ov-wrap .ov-table tr.ov-tr.is-on > td { background:color-mix(in srgb, var(--mv-green) 12%, transparent); }
+  #ov-wrap .ov-table tr.ov-tr.is-locked { opacity:.55; }
+  #ov-wrap .ov-table tr.ov-tr:focus-visible { outline:2px solid var(--mv-accent); outline-offset:-2px; }
+  #ov-wrap .ov-mark { display:grid; place-items:center; font-size:16px; color:var(--mv-label-3); }
+  #ov-wrap .ov-mark.is-on { color:var(--mv-accent); }
+  #ov-wrap .ov-mark.is-live { color:var(--mv-green); }
+  #ov-wrap .ov-srv { display:flex; align-items:center; gap:10px; min-width:0; }
+  #ov-wrap .ov-srv-t { display:flex; flex-direction:column; min-width:0; line-height:1.45; }
+  #ov-wrap .ov-srv-t > b { font-size:12.5px; font-weight:600; display:flex; align-items:center; gap:6px; }
+  #ov-wrap .ov-srv-t > small { font-size:11px; color:var(--mv-label-3); font-family:var(--mv-font-tech); text-align:start; }
+  #ov-wrap .ov-srv-t > small.is-live { color:var(--mv-green-ink); font-family:inherit; }
+  /* a narrow window drops the columns that matter least, rather than scrolling sideways */
+  @container (max-width: 660px) { #ov-wrap .ov-c-score, #ov-wrap .ov-c-sess { display:none; } }
+  @container (max-width: 520px) { #ov-wrap .ov-c-speed { display:none; } }
+
+  /* ── «اتصال»: where the button goes ── */
+  #ov-wrap .ov-dest { margin-top:14px; border-radius:14px; background:var(--mv-group);
+    box-shadow:inset 0 0 0 var(--mv-hl) var(--mv-group-edge); overflow:hidden; }
+  #ov-wrap .ov-dest-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 14px 10px; }
+  #ov-wrap .ov-dest-head > h3 { margin:0; font-size:13px; font-weight:700; }
+  #ov-wrap .ov-dest-head > .mv-seg { margin-inline-start:auto; }
+  #ov-wrap .ov-dest .mv-li { min-height:58px; padding-inline:14px; }
+  #ov-wrap .ov-dest .mv-li + .mv-li::before { inset-inline-start:14px; }
+  #ov-wrap .ov-dest .mv-li-end { display:flex; align-items:center; gap:4px; font-size:12px; color:var(--mv-accent); }
+  #ov-wrap .ov-dest .mv-li-lead > .ov-src { width:30px; height:30px; border-radius:8px; display:grid; place-items:center;
+    font-size:16px; color:#fff; background:var(--tint); }
+  #ov-wrap .ov-dest-foot { padding:0 14px 12px; font-size:11.5px; line-height:1.75; color:var(--mv-label-2); }
+
+  /* the home page's cards */
+  #ov-wrap .ov-kv { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:5px 13px;
+    font-size:12px; color:var(--mv-label-2); }
+  #ov-wrap .ov-kv > span { flex:none; white-space:nowrap; }
+  #ov-wrap .ov-kv > b { font-weight:600; color:var(--mv-label); text-align:end; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #ov-wrap .ov-card-act { display:flex; gap:6px; flex-wrap:wrap; padding:6px 13px 2px; }
+  #ov-wrap .ov-card-line { padding:6px 13px 0; font-size:12px; line-height:1.75; color:var(--mv-label-2); }
+  #ov-wrap .ov-card-line b { color:var(--mv-label); font-weight:600; }
+  #ov-wrap .ov-card-line.is-warn b { color:var(--mv-orange-ink); }
 
   /* countries */
-  #ov-wrap #ov-countries { display:grid; gap:2px; grid-template-columns:repeat(auto-fill, minmax(210px, 1fr)); }
-  #ov-wrap #ov-countries > .mv-form-row + .mv-form-row::before { content:none; }
-  #ov-wrap .ov-crow { display:flex; align-items:center; gap:9px; width:100%; text-align:start;
-    border:0; background:none; color:inherit; font:inherit; cursor:pointer; padding:7px 11px; border-radius:9px; }
-  #ov-wrap .ov-crow:hover { background:var(--mv-fill); }
-  #ov-wrap .ov-crow .ov-mark { flex:none; width:18px; font-size:15px; color:var(--mv-label-3); }
-  #ov-wrap .ov-crow .ov-mark.is-on { color:var(--mv-accent); }
-  #ov-wrap .ov-crow span.ov-cname { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12.5px; }
-  #ov-wrap .ov-crow small { flex:none; font-size:11px; color:var(--mv-label-3); }
+  #ov-wrap .ov-cgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:2px; padding:4px; }
+  #ov-wrap .ov-cgrid > .mv-li { border-radius:9px; min-height:40px; padding-inline:10px; }
+  #ov-wrap .ov-cgrid > .mv-li::before { content:none; }
+  #ov-wrap .ov-cgrid > .mv-li.is-sel { background:color-mix(in srgb, var(--mv-accent) 12%, transparent); }
 
-  #ov-wrap .ov-snack { position:absolute; inset-inline:0; bottom:54px; display:flex; justify-content:center;
-    pointer-events:none; z-index:5; }
-  #ov-wrap .ov-snack > span { background:var(--mv-fill-2); backdrop-filter:blur(18px);
+  /* one server's page */
+  #ov-wrap .ov-dhead { display:flex; align-items:center; gap:14px; padding:4px 4px 16px; }
+  #ov-wrap .ov-dhead > .mv-flag { border-radius:6px; }
+  #ov-wrap .ov-dhead h2 { margin:0; font-size:20px; font-weight:740; }
+  #ov-wrap .ov-dhead p { margin:3px 0 0; font-size:12px; color:var(--mv-label-2); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  #ov-wrap .ov-dhead .ov-dhead-act { margin-inline-start:auto; display:flex; gap:8px; flex-wrap:wrap; }
+  #ov-wrap .ov-val { margin-inline-start:auto; min-width:0; font-size:12.5px; text-align:end; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  #ov-wrap .ov-log { margin:0; width:100%; max-height:none; min-height:280px; overflow:auto;
+    font-family:var(--mv-font-mono); font-size:11.5px; line-height:1.75; white-space:pre-wrap; word-break:break-word;
+    text-align:left; color:var(--mv-label-2); }
+
+  #ov-wrap .ov-snack { position:absolute; inset-inline:0; bottom:48px; display:flex; justify-content:center; pointer-events:none; z-index:3; }
+  #ov-wrap .ov-snack > span { background:var(--mv-fill-2); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px);
     border-radius:11px; padding:8px 15px; font-size:12px; box-shadow:0 6px 20px rgba(0,0,0,.28); }
+
+  /* the sheet: over the window, under its title band (whose traffic lights must stay usable) */
+  #ov-wrap .ov-scrim { position:absolute; inset:0; z-index:4; display:flex; align-items:flex-start; justify-content:center;
+    padding:56px 20px 20px; background:color-mix(in srgb, #000 30%, transparent); animation:ov-fade .16s ease-out; }
+  #ov-wrap .ov-scrim > .mv-sheet { width:min(460px, 100%); animation:ov-drop .22s cubic-bezier(.2, .8, .2, 1); }
+  @keyframes ov-fade { from { opacity:0; } }
+  @keyframes ov-drop { from { opacity:0; transform:translateY(-12px); } }
+  html[data-motion="reduced"] #ov-wrap .ov-scrim, html[data-motion="reduced"] #ov-wrap .ov-scrim > .mv-sheet { animation:none; }
 </style>`;
 
     // ── the page ───────────────────────────────────────────────────────────
 
     const OV_SECTIONS = [
         { id: 'connect', label: 'اتصال', icon: 'ph-fill ph-power', tint: 'var(--mv-green)' },
-        { id: 'servers', label: 'سرورها', icon: 'ph-fill ph-hard-drives', tint: 'var(--mv-indigo)' },
-        { id: 'guide', label: 'راهنمای سرورها', icon: 'ph-fill ph-book-open', tint: 'var(--mv-blue)' },
-        { id: 'log', label: 'گزارش', icon: 'ph-fill ph-terminal-window', tint: 'var(--mv-label-2)' },
+        { id: 'servers', label: 'سرورهای عمومی', icon: 'ph-fill ph-globe-hemisphere-west', tint: 'var(--mv-indigo)', group: 'src' },
+        // TunnelBear's 47 countries, the user's own .ovpn profiles and the accounts they sign in
+        // with are components/openvpn-profiles.js.
+        { id: 'tunnelbear', label: 'TunnelBear', icon: 'ph-fill ph-paw-print', tint: 'var(--mv-orange)', group: 'src' },
+        { id: 'profiles', label: 'پروفایل‌های من', icon: 'ph-fill ph-file-text', tint: 'var(--mv-teal)', group: 'src' },
+        { id: 'accounts', label: 'حساب‌ها', icon: 'ph-fill ph-user-circle', tint: 'var(--mv-blue)', group: 'more' },
+        { id: 'guide', label: 'راهنما', icon: 'ph-fill ph-book-open', tint: 'var(--mv-purple)', group: 'more' },
+        { id: 'log', label: 'گزارش', icon: 'ph-fill ph-terminal-window', tint: 'var(--mv-gray)', group: 'more' },
     ];
+    const SECTION_OF = Object.fromEntries(OV_SECTIONS.map((x) => [x.id, x]));
 
     /**
-     * Pages reachable only from «سرورها», which is where they belong: a country filter and a sort
-     * order are decisions ABOUT the list, not siblings of it. The back button returns to the list,
-     * exactly as the Android page stack does.
+     * Pages reachable only from «سرورهای عمومی», which is where they belong: a country filter and a
+     * sort order are decisions ABOUT the list, not siblings of it. The back button returns to the
+     * list, exactly as the Android page stack does.
      */
     const SUB = { countries: 'کشورها', sort: 'مرتب‌سازی', detail: 'سرور' };
 
+    /** The three places a server can come from, as «مقصد اتصال» names them. */
+    const SOURCES = [
+        { kind: 'gate', sec: 'servers', label: 'سرورهای عمومی', icon: 'ph-fill ph-globe-hemisphere-west', tint: 'var(--mv-indigo)' },
+        { kind: 'bear', sec: 'tunnelbear', label: 'TunnelBear', icon: 'ph-fill ph-paw-print', tint: 'var(--mv-orange)' },
+        { kind: 'own', sec: 'profiles', label: 'پروفایل‌های من', icon: 'ph-fill ph-file-text', tint: 'var(--mv-teal)' },
+    ];
+    const SOURCE_OF = Object.fromEntries(SOURCES.map((x) => [x.kind, x]));
+
     let ovSec = 'connect';
+
+    function sideItem(x) {
+        return `
+        <button type="button" class="mv-side-item" data-ov-sec="${x.id}">
+          <span class="mv-side-tile" style="--tint:${x.tint}"><i class="${x.icon}"></i></span><span>${x.label}</span><b class="ov-count" data-count="${x.id}"></b>
+        </button>`;
+    }
 
     function template() {
         return CSS + `
@@ -359,11 +472,18 @@
     <div class="mv-side-top"></div>
     <div class="mv-eng-ident" id="ov-ident"></div>
     <nav class="mv-side-list">
+      <div class="mv-side-group">${sideItem(SECTION_OF.connect)}</div>
       <div class="mv-side-group">
-        ${OV_SECTIONS.map((x) => `
-        <button type="button" class="mv-side-item" data-ov-sec="${x.id}">
-          <span class="mv-side-tile" style="--tint:${x.tint}"><i class="${x.icon}"></i></span><span>${x.label}</span>
-        </button>`).join('')}
+        <div class="mv-side-head">سرورها</div>
+        ${OV_SECTIONS.filter((x) => x.group === 'src').map(sideItem).join('')}
+      </div>
+      <div class="mv-side-group">${OV_SECTIONS.filter((x) => x.group === 'more').map(sideItem).join('')}</div>
+      <div class="mv-side-group">
+        <button type="button" class="mv-side-item mv-side-go" data-ov-store="1" title="هستهٔ اوپن‌وی‌پی‌ان در ام‌ال‌ام استور">
+          <span class="mv-side-tile" style="--tint:var(--mv-blue)"><i class="ph-fill ph-arrow-circle-down"></i></span>
+          <span>بررسی بروزرسانی</span>
+          <i class="ph-bold ph-arrow-up-left" aria-hidden="true"></i>
+        </button>
       </div>
     </nav>
   </aside>
@@ -374,33 +494,26 @@
         <button type="button" id="ov-back" aria-label="بخش قبلی" title="بخش قبلی" disabled><i class="ph-bold ph-caret-right"></i></button>
       </div>
       <h1 class="mv-pane-title" id="ov-pane-title">اتصال</h1>
+      <div class="mv-eng-bar-action" id="ov-bar-action"></div>
     </header>
 
     <div class="mv-pane-scroll custom-scrollbar" id="ov-scroll">
       <div class="mv-eng-sec is-on" data-sec="connect">
-        <div class="mv-eng-stage" id="ov-stage" style="--tint:var(--mv-indigo)"></div>
+        <div class="mv-eng-stage" id="ov-stage" style="--tint:var(--mv-orange)"></div>
+        <div class="ov-dest" id="ov-dest"></div>
         <div class="mv-eng-grid" id="ov-cards"></div>
       </div>
 
       <div class="mv-eng-sec" data-sec="servers">
-        <div class="mv-form">
-          <div class="mv-form-section is-wide">
-            <div class="ov-tools" id="ov-tools"></div>
-            <div class="mv-form-group" id="ov-servers" role="radiogroup"></div>
-            <div class="mv-form-footer" id="ov-list-note"></div>
-          </div>
-        </div>
+        <div class="ov-toolbar" id="ov-tools"></div>
+        <div class="mv-form-group ov-tgroup" id="ov-servers"></div>
+        <div class="mv-form-footer" id="ov-list-note"></div>
       </div>
 
       <div class="mv-eng-sec" data-sec="countries">
-        <div class="mv-form">
-          <div class="mv-form-section is-wide">
-            <div class="mv-form-header" id="ov-country-head">کشور</div>
-            <div class="ov-tools" id="ov-country-tools"></div>
-            <div class="mv-form-group" id="ov-countries"></div>
-            <div class="mv-form-footer">فهرست را به یک یا چند کشور محدود می‌کند. بدون فیلتر، همهٔ سرورهای این فهرست نمایش داده می‌شوند. می‌توانید چند کشور را با هم انتخاب کنید — مثلاً برای اینکه یک قاره را یک‌جا تست بگیرید.</div>
-          </div>
-        </div>
+        <div class="ov-toolbar" id="ov-country-tools"></div>
+        <div class="mv-form-group"><div class="ov-cgrid" id="ov-countries"></div></div>
+        <div class="mv-form-footer">فهرست را به یک یا چند کشور محدود می‌کند. بدون فیلتر، همهٔ سرورهای این فهرست نمایش داده می‌شوند. می‌توانید چند کشور را با هم انتخاب کنید — مثلاً برای اینکه یک قاره را یک‌جا تست بگیرید.</div>
       </div>
 
       <div class="mv-eng-sec" data-sec="sort">
@@ -408,18 +521,16 @@
           <div class="mv-form-section">
             <div class="mv-form-header">مرتب‌سازی</div>
             <div class="mv-form-group" id="ov-sorts" role="radiogroup"></div>
-            <div class="mv-form-footer">ترتیب فقط روی نمایش اثر دارد؛ هیچ سروری با آن حذف یا اضافه نمی‌شود. پیش‌فرض روی «تست‌شده‌ها اول» است.</div>
+            <div class="mv-form-footer">ترتیب فقط روی نمایش اثر دارد؛ هیچ سروری با آن حذف یا اضافه نمی‌شود. پیش‌فرض روی «تست‌شده‌ها اول» است. سرستون‌های جدول سرورها هم همین کار را می‌کنند.</div>
           </div>
         </div>
       </div>
 
-      <div class="mv-eng-sec" data-sec="detail">
-        <div id="ov-detail"></div>
-      </div>
-
-      <div class="mv-eng-sec" data-sec="guide">
-        <div id="ov-guide"></div>
-      </div>
+      <div class="mv-eng-sec" data-sec="detail"><div id="ov-detail"></div></div>
+      <div class="mv-eng-sec" data-sec="tunnelbear"><div id="ov-tunnelbear"></div></div>
+      <div class="mv-eng-sec" data-sec="profiles"><div id="ov-profiles"></div></div>
+      <div class="mv-eng-sec" data-sec="accounts"><div id="ov-accounts"></div></div>
+      <div class="mv-eng-sec" data-sec="guide"><div id="ov-guide"></div></div>
 
       <div class="mv-eng-sec" data-sec="log">
         <div class="mv-form">
@@ -428,6 +539,7 @@
             <div class="mv-form-group">
               <div class="mv-form-row is-stack"><pre class="ov-log" id="ov-log" dir="ltr"></pre></div>
             </div>
+            <div class="mv-form-footer">وقتی اتصال نگیرد، این تنها جایی است که می‌گوید دقیقاً کجا ایستاد.</div>
           </div>
         </div>
       </div>
@@ -436,6 +548,7 @@
     <div class="mv-eng-foot" id="ov-foot"></div>
     <div class="ov-snack" id="ov-snack" hidden></div>
   </section>
+  <div id="ov-sheet-host"></div>
 </div>`;
     }
 
@@ -443,12 +556,71 @@
         return `<i class="mv-eng-dot${tone === 'on' ? ' is-on' : tone === 'busy' ? ' is-busy' : ''}"></i>`;
     }
 
-    // ── what the hero says ─────────────────────────────────────────────────
+    // ── what the power button is aimed at ───────────────────────────────────
 
     function selectedRow() {
         return st.mine.find(r => r.host === st.selected)
             || st.archive.find(r => r.host === st.selected) || null;
     }
+
+    /** openvpn-profiles.js's data: TunnelBear, the user's own profiles, the accounts. */
+    function prof() {
+        return (window.OvProfiles && OvProfiles.data()) || { loaded: false, profiles: [], accounts: { list: [] } };
+    }
+
+    /**
+     * The chosen destination, whichever source it is in — or `{ ok:false }` with the reason the
+     * button cannot act on it yet.
+     */
+    function targetInfo() {
+        const t = st.target;
+        const src = SOURCE_OF[t.kind] || SOURCES[0];
+        if (t.kind === 'gate') {
+            const r = selectedRow();
+            if (!r) return { kind: 'gate', src, ok: false, why: 'هنوز سروری انتخاب نشده' };
+            return {
+                kind: 'gate', src, ok: true, id: r.host, cc: r.cc,
+                name: (countryName(r.cc) || r.country) + (r.official ? ' · رسمی' : ''),
+                host: shortName(r.host),
+                sub: resultWords(r.host) || `${fa(r.speedMbps)} مگابیت آگهی‌شده`,
+            };
+        }
+        const P = prof();
+        const p = P.profiles.find((x) => x.id === t.id && (t.kind === 'bear' ? x.tunnelbear : !x.tunnelbear));
+        if (!p) {
+            return { kind: t.kind, src, ok: false,
+                why: t.kind === 'bear' ? 'هنوز کشوری انتخاب نشده' : (P.profiles.some((x) => !x.tunnelbear) ? 'هنوز پروفایلی انتخاب نشده' : 'هنوز پروفایلی اضافه نکرده‌اید') };
+        }
+        const needsAccount = t.kind === 'bear' && !(P.accounts && P.accounts.list && P.accounts.list.length);
+        return {
+            kind: t.kind, src, ok: !needsAccount, id: p.id, cc: p.place && p.place.code,
+            name: (p.place && p.place.name) || p.name,
+            host: t.kind === 'own' ? p.name : '',
+            sub: needsAccount ? 'اول یک حساب TunnelBear اضافه کنید' : (window.OvProfiles ? OvProfiles.delayWords(p) : ''),
+            why: needsAccount ? 'برای TunnelBear یک حساب لازم است' : '',
+        };
+    }
+
+    /** Is this destination the one carrying traffic right now? */
+    function isLive(kind, id) {
+        const s = status();
+        if (!s.connected) return false;
+        return kind === 'gate' ? (!s.profileId && s.host === id) : s.profileId === id;
+    }
+
+    /** The live connection's own name, from whichever source it came. */
+    function liveName() {
+        const s = status();
+        if (s.profileId) {
+            const p = prof().profiles.find((x) => x.id === s.profileId);
+            const n = (p && p.place && p.place.name) || s.label || (p && p.name) || '';
+            return { name: n, word: p && p.tunnelbear ? 'TunnelBear' : 'پروفایل شما', cc: p && p.place && p.place.code };
+        }
+        const r = st.mine.find((x) => x.host === s.host) || st.archive.find((x) => x.host === s.host);
+        return { name: r ? (countryName(r.cc) || r.country) : (s.label || shortName(s.host)), word: 'سرور عمومی', cc: r && r.cc, host: shortName(s.host) };
+    }
+
+    // ── what the hero says ─────────────────────────────────────────────────
 
     function ovView() {
         const p = st.payload || {}, s = p.status || {};
@@ -460,34 +632,39 @@
                 line: 'این بخش هستهٔ رسمی OpenVPN را راه می‌اندازد و خودش مدیریتش می‌کند. یک بار از «استور» نصبش کنید و بعد از آن همه چیز از همین پنجره انجام می‌شود.' });
         }
         if (s.connected) {
+            const ln = liveName();
             const bits = [];
             if (s.localIp) bits.push(`آدرس <code>${esc(s.localIp)}</code>`);
-            if (s.via) bits.push(`از <b>${esc(s.via)}</b>`);
+            bits.push(s.path === 'split' ? 'مستقیم، از رلهٔ محلی' : 'مستقیم');
             if (s.since) bits.push(`<span class="ov-num" dir="ltr">${duration(Date.now() - s.since)}</span>`);
             return Object.assign(base, { tone: 'on', act: 'off',
                 head: 'وصل است',
-                line: (s.host ? `همهٔ ترافیک سیستم از <code>${esc(shortName(s.host))}</code> رد می‌شود. ` : '') + bits.join(' · ') });
+                line: `همهٔ ترافیک سیستم از <b>${esc(ln.name)}</b> (${esc(ln.word)}) رد می‌شود. ` + bits.join(' · ') });
         }
         if (s.connecting) {
             return Object.assign(base, { tone: 'busy', act: 'off',
                 head: 'در حال اتصال…',
-                line: esc(s.detail || '') || 'نشست در حال برقراری… دکمهٔ بالا لغو می‌کند.' });
+                line: esc(s.detail || '') || 'نشست در حال برقراری… همین دکمه لغو می‌کند.' });
         }
+        const t = targetInfo();
         if (s.error) {
-            return Object.assign(base, { tone: 'off', act: st.selected ? 'on' : '',
+            return Object.assign(base, { tone: 'off', act: t.ok ? 'on' : '',
                 head: 'وصل نشد',
                 line: esc(s.error) + ' — بخش «گزارش» خط‌به‌خط می‌گوید کجا ایستاد.' });
         }
-        if (!st.selected) {
+        if (!t.ok) {
             return Object.assign(base, { tone: 'off', act: '',
-                head: 'سروری انتخاب نشده',
-                line: 'همان شبکهٔ عمومی رایگان — هزاران سرور داوطلبانه در دنیا، بدون حساب و بدون هزینه — ولی با موتور <b>OpenVPN</b>. در «سرورها» یکی را بردارید، یا «تست واقعی» را بزنید تا خودش سرورِ واقعاً سالم را پیدا کند.' });
+                head: t.kind === 'bear' && t.why ? 'حساب TunnelBear لازم است' : 'مقصدی انتخاب نشده',
+                line: t.kind === 'bear' && t.why && t.id
+                    ? 'سرورهای TunnelBear فقط با حساب خودتان وصل می‌شوند. در «حساب‌ها» یکی اضافه کنید.'
+                    : 'سه جا سرور دارد: <b>سرورهای عمومی</b> (هزاران سرور داوطلبانه، بدون حساب)، <b>TunnelBear</b> با حساب خودتان، و <b>پروفایل‌های من</b> از فایل‌های .ovpn خودتان. از «مقصد اتصال» پایین یکی را انتخاب کنید.' });
         }
-        return Object.assign(base, { tone: 'off', act: 'on',
-            head: 'آمادهٔ اتصال',
-            line: `هستهٔ رسمی OpenVPN آداپتور TUN خودش را باز می‌کند، پس تونل کامل سیستم را خودش برقرار می‌کند. ${st.front === 'none'
-                ? 'مسیر روی «مستقیم» است — روی خط فیلترشده معمولاً وصل نمی‌شود.'
-                : 'دست‌دادنش از داخل یک فرانت می‌رود، چون روی خط خام بسته است.'}` });
+        const lines = {
+            gate: 'هستهٔ رسمی OpenVPN آداپتور TUN خودش را باز می‌کند، پس تونل کامل سیستم را خودش برقرار می‌کند. اتصال <b>مستقیم</b> است — بدون سایفون یا هیچ موتور دیگری.',
+            bear: 'سرورهای TunnelBear از ایران روی UDP بسته‌اند؛ اتصال از راه TCP و یک رلهٔ محلی برقرار می‌شود که شکل بسته‌های اول را برای فیلتر ناخوانا می‌کند. <b>مستقیم</b> است — بدون هیچ موتور دیگری.',
+            own: 'پروفایل خودتان، همان‌طور که فایلش می‌گوید — فقط دستورهای شناخته‌شدهٔ OpenVPN، بدون هیچ اسکریپتی. تونل کامل سیستم را خود هستهٔ OpenVPN برقرار می‌کند.',
+        };
+        return Object.assign(base, { tone: 'off', act: 'on', head: 'آمادهٔ اتصال', line: lines[t.kind] });
     }
 
     function renderIdent() {
@@ -497,10 +674,29 @@
         const word = v.tone === 'on' ? 'وصل است' : v.tone === 'busy' ? 'در حال کار' : 'خاموش';
         const app = window.MV && MV.apps && MV.apps.get && MV.apps.get('openvpn');
         const icon = (app && MV.apps.iconHTML) ? MV.apps.iconHTML(app, 54)
-            : '<span class="mv-side-tile" style="--tint:var(--mv-indigo)"><svg aria-hidden="true"><use href="#g-server"/></svg></span>';
-        host.innerHTML = `${icon}
+            : '<span class="mv-side-tile" style="--tint:var(--mv-orange)"><svg aria-hidden="true"><use href="#g-server"/></svg></span>';
+        const html = `${icon}
       <b>اوپن‌وی‌پی‌ان</b>
       <small>${ovDot(v.tone)}${word}</small>`;
+        // Rebuilt only when it changes: the icon is an image, and replacing it flickers.
+        if (host.dataset.html !== html) { host.innerHTML = html; host.dataset.html = html; }
+    }
+
+    /** The counts at the end of the three source items. */
+    function renderSideCounts() {
+        const wrap = $('ov-wrap');
+        if (!wrap) return;
+        const P = prof();
+        // Nothing, rather than «۰»: a Persian zero is a dot, and a dot at the end of a sidebar item
+        // reads as a status lamp.
+        const n = (x) => (x ? fa(x) : '');
+        const counts = {
+            servers: n(st.mine.length),
+            tunnelbear: P.loaded ? n(P.profiles.filter((x) => x.tunnelbear).length) : '',
+            profiles: P.loaded ? n(P.profiles.filter((x) => !x.tunnelbear).length) : '',
+            accounts: P.loaded ? n(P.accounts.list.length) : '',
+        };
+        wrap.querySelectorAll('[data-count]').forEach((b) => { b.textContent = counts[b.getAttribute('data-count')] || ''; });
     }
 
     /** BUILT ONCE and then updated — replacing the node restarts the ring's animation. */
@@ -539,7 +735,7 @@
         // control does, not what the engine is.
         const aria = v.act === 'off' ? (v.s.connecting ? 'لغو' : 'قطع') : 'اتصال';
         btn.setAttribute('aria-label', aria);
-        btn.title = v.act ? aria : (!v.s.installed ? 'هستهٔ OpenVPN نصب نیست' : 'اول یک سرور انتخاب کنید');
+        btn.title = v.act ? aria : (!v.s.installed ? 'هستهٔ OpenVPN نصب نیست' : (targetInfo().why || 'اول یک مقصد انتخاب کنید'));
         const glyph = (v.tone === 'busy' || st.busy) ? 'mv-spin-ring'
             : v.tone === 'on' ? 'ph-fill ph-power' : 'ph-bold ph-power';
         const gl = q('glyph');
@@ -549,76 +745,61 @@
         if (el && window.MVEngineLive) MVEngineLive.mount(el);
     }
 
+    /**
+     * «مقصد اتصال»: which of the three sources the button uses, and what is chosen in it.
+     *
+     * The segmented control switches source; the row under it is the chosen server of that
+     * source and opens its list. So the whole decision is readable on the page the button is on.
+     */
+    function renderDest() {
+        const host = $('ov-dest');
+        if (!host) return;
+        const t = targetInfo();
+        const s = status();
+        const live = t.ok && isLive(t.kind, t.id);
+        const lead = t.ok && (t.cc || t.kind === 'gate')
+            ? flag(t.cc, 26)
+            : `<span class="ov-src" style="--tint:${t.src.tint}"><i class="${t.src.icon}"></i></span>`;
+        const foot = {
+            gate: 'سرورهای داوطلبانهٔ VPN Gate — بدون حساب و بدون هزینه. «تست واقعی» در همان صفحه، سرورهایی را که روی خط شما واقعاً وصل می‌شوند پیدا می‌کند.',
+            bear: 'چهل‌وهفت کشور TunnelBear، با حساب خودتان. «سنجش تأخیر» در همان صفحه سالم‌ترین سرور هر کشور را پیدا می‌کند.',
+            own: 'فایل‌های .ovpn خودتان — از سرور خودتان یا هر سرویسی که پروفایل OpenVPN می‌دهد.',
+        }[t.kind];
+        host.innerHTML = `
+      <div class="ov-dest-head">
+        <h3>مقصد اتصال</h3>
+        <div class="mv-seg" role="tablist" aria-label="منبع سرور">
+          ${SOURCES.map((x) => `<button type="button" role="tab" data-ov-kind="${x.kind}" aria-pressed="${st.target.kind === x.kind}"${s.connecting || st.busy ? ' disabled' : ''}>${x.label}</button>`).join('')}
+        </div>
+      </div>
+      <div class="mv-list">
+        <button type="button" class="mv-li${live ? ' is-on' : t.ok ? ' is-sel' : ''}" data-ov-go="${t.src.sec}">
+          <span class="mv-li-lead">${lead}</span>
+          <span class="mv-li-text">
+            <b>${t.ok || t.id ? esc(t.name) + (t.host ? ` <code>${esc(t.host)}</code>` : '') : esc(t.why)}</b>
+            <small>${live ? 'همین حالا وصل است' : t.ok || t.id ? t.sub : 'از فهرست «' + esc(t.src.label) + '» یکی را انتخاب کنید'}</small>
+          </span>
+          <span class="mv-li-end">${t.ok || t.id ? 'تغییر' : 'انتخاب'}<i class="ph-bold ph-caret-left"></i></span>
+        </button>
+      </div>
+      <div class="ov-dest-foot">${foot}</div>`;
+    }
+
     // ── the connect page's cards ───────────────────────────────────────────
 
     function renderCards() {
         const host = $('ov-cards');
         if (!host) return;
         const p = st.payload || {}, s = p.status || {};
-        const sel = selectedRow();
         const proven = Object.values(st.probes).filter(x => x && x.ok).length;
         const lastLog = st.log.length ? st.log[st.log.length - 1] : '';
         const stale = isStale(p.fetchedAt);
+        const P = prof();
+        const accs = (P.accounts && P.accounts.list) || [];
+        const active = accs.find((a) => a.id === P.accounts.activeId) || accs[0] || null;
+        const own = P.profiles.filter((x) => !x.tunnelbear).length;
 
         host.innerHTML = `
-      <div class="mv-eng-card2" style="--tint:var(--mv-indigo)">
-        <div class="mv-eng-card2-top">
-          <button type="button" class="mv-eng-card2-head" data-ov-go="servers">
-            <span class="mv-eng-glyph"><i class="ph-fill ph-hard-drives"></i></span>
-            <h3>سرور</h3>
-            <span class="mv-eng-card2-end">${sel ? esc(countryName(sel.cc) || sel.country) : 'انتخاب نشده'}<i class="ph-bold ph-caret-left"></i></span>
-          </button>
-          <button type="button" class="mv-eng-card2-act" data-ov-act="probe-top"
-                  title="تست واقعی روی فهرست من" aria-label="تست واقعی روی فهرست من"
-                  ${st.busy || sweep() || !st.mine.length ? 'disabled' : ''}>
-            <i class="${sweep() ? 'mv-spin-ring' : 'ph-bold ph-pulse'}"></i>
-          </button>
-        </div>
-        <div class="mv-eng-card2-body">
-          ${sel ? `
-          <div class="mv-eng-pick is-on${s.connected && s.host === sel.host ? ' is-live' : ''}" aria-disabled="true">
-            ${flag(sel.cc, 22)}
-            <span class="mv-eng-pick-text">
-              <b>${esc(countryName(sel.cc) || sel.country)}${sel.official ? ' · رسمی' : ''} <code>${esc(shortName(sel.host))}</code></b>
-              <small>${resultWords(sel.host) || `${fa(sel.speedMbps)} مگابیت آگهی‌شده`}</small>
-            </span>
-          </div>`
-            : '<div class="mv-eng-card2-foot" style="padding-top:6px">هنوز سروری انتخاب نشده.</div>'}
-        </div>
-        <div class="mv-eng-card2-foot">${proven
-            ? `«تست واقعی» تا الان ${fa(proven)} سرور را سالم تأیید کرده.`
-            : 'پینگ فقط می‌گوید بسته چقدر طول می‌کشد به سرور برسد. «تست واقعی» دست‌دادن کامل را انجام می‌دهد، پس روی خطوط ایران بسیار قابل‌اعتمادتر است.'}</div>
-      </div>
-
-      <div class="mv-eng-card2" style="--tint:var(--mv-blue)">
-        <div class="mv-eng-card2-top">
-          <button type="button" class="mv-eng-card2-head" data-ov-go="servers">
-            <span class="mv-eng-glyph"><i class="ph-fill ph-list-bullets"></i></span>
-            <h3>فهرست</h3>
-            <span class="mv-eng-card2-end">${fa(st.mine.length)}<i class="ph-bold ph-caret-left"></i></span>
-          </button>
-          <button type="button" class="mv-eng-card2-act" data-ov-act="refresh"
-                  title="به‌روزرسانی فهرست" aria-label="به‌روزرسانی فهرست"
-                  ${st.busy || sweep() ? 'disabled' : ''}>
-            <i class="${st.busy ? 'mv-spin-ring' : 'ph-bold ph-arrows-clockwise'}"></i>
-          </button>
-        </div>
-        <div class="mv-eng-card2-body">
-          <div class="mv-eng-pick" aria-disabled="true">
-            <i class="ph-fill ph-database"${stale ? ' style="color:var(--mv-orange)"' : ''}></i>
-            <span class="mv-eng-pick-text">
-              <b>${fa(st.mine.length)} سرور در فهرست شما، و ${fa(st.archive.length)} سرور در آرشیو</b>
-              <small>${p.fetchedAt ? 'آخرین به‌روزرسانی ' + esc(ago(p.fetchedAt)) : (p.source === 'bundled' ? 'فهرست همراه برنامه' : 'هنوز به‌روزرسانی نشده')}</small>
-            </span>
-          </div>
-        </div>
-        <div class="mv-eng-card2-foot">${!p.canRefresh
-            ? 'سایت فهرست از ایران همیشه باز نیست. <b>برای به‌روزرسانی، اول یکی از تونل‌های برنامه را روشن کنید</b> — بعد این دکمه فهرست را از داخل همان تونل می‌گیرد.'
-            : stale
-                ? 'فهرست شما کهنه است. VPN Gate سرورهایش را مدام عوض می‌کند، پس بیشتر این‌ها دیگر جواب نمی‌دهند.'
-                : 'هر به‌روزرسانی فهرست را <b>بزرگ‌تر</b> می‌کند، نه اینکه جایش را بگیرد — سرورهای قدیمی در «آرشیو» می‌مانند و هر وقت خواستید به فهرستتان برمی‌گردند.'}</div>
-      </div>
-
       <div class="mv-eng-card2" style="--tint:var(--mv-green)">
         <div class="mv-eng-card2-head" style="cursor:default">
           <span class="mv-eng-glyph"><i class="ph-fill ph-plugs-connected"></i></span>
@@ -627,111 +808,73 @@
         </div>
         <div class="mv-eng-card2-body">
           ${s.connected ? `
-          <div class="mv-eng-card2-foot" style="display:flex;justify-content:space-between;padding:4px 13px"><span>آدرس در شبکه</span><b dir="ltr">${esc(s.localIp || '—')}</b></div>
-          <div class="mv-eng-card2-foot" style="display:flex;justify-content:space-between;padding:4px 13px"><span>مدت اتصال</span><b dir="ltr" class="ov-num">${s.since ? duration(Date.now() - s.since) : '—'}</b></div>
-          <div class="mv-eng-card2-foot" style="display:flex;justify-content:space-between;padding:4px 13px"><span>مسیر واقعی داده</span><b dir="ltr">${esc(s.via || 'مستقیم')}</b></div>
-          <div class="mv-eng-card2-foot" style="display:flex;justify-content:space-between;padding:4px 13px"><span>آداپتور</span><b dir="ltr">${esc(s.adapter || '—')}${s.adapterDriver ? ' · ' + esc(s.adapterDriver) : ''}</b></div>`
-            : '<div class="mv-eng-card2-foot" style="padding-top:6px">این موتور آداپتور TUN خودش را باز می‌کند، پس تونل کامل سیستم را خودش برقرار می‌کند — نه پروکسی، نه تنظیمی در ویندوز.</div>'}
+          <div class="ov-kv"><span>آدرس در شبکه</span><b dir="ltr">${esc(s.localIp || '—')}</b></div>
+          <div class="ov-kv"><span>مدت اتصال</span><b dir="ltr" class="ov-num">${s.since ? duration(Date.now() - s.since) : '—'}</b></div>
+          <div class="ov-kv"><span>مسیر داده</span><b>${s.path === 'split' ? 'مستقیم — رلهٔ محلی (TCP)' : 'مستقیم'}</b></div>
+          <div class="ov-kv"><span>دریافت / ارسال</span><b>${bytesText(s.bytesIn)} / ${bytesText(s.bytesOut)}</b></div>
+          <div class="ov-kv"><span>آداپتور</span><b dir="ltr">${esc(s.adapter || '—')}${s.adapterDriver ? ' · ' + esc(s.adapterDriver) : ''}</b></div>`
+            : '<div class="ov-card-line">این موتور آداپتور TUN خودش را باز می‌کند، پس تونل کامل سیستم را خودش برقرار می‌کند — نه پروکسی، نه تنظیمی در ویندوز.</div>'}
         </div>
-        <div class="mv-eng-card2-foot">«مسیر واقعی داده» می‌گوید بایت‌ها از کجا رد می‌شوند: مستقیم، یا از داخل فرانتی که این اتصال رویش سوار است.</div>
+        <div class="mv-eng-card2-foot">اتصال همیشه مستقیم است؛ سرورهای TCP از یک رلهٔ محلی وصل می‌شوند که خودش مستقیم به سرور وصل می‌شود.</div>
+      </div>
+
+      <div class="mv-eng-card2" style="--tint:var(--mv-indigo)">
+        <div class="mv-eng-card2-top">
+          <button type="button" class="mv-eng-card2-head" data-ov-go="servers">
+            <span class="mv-eng-glyph"><i class="ph-fill ph-globe-hemisphere-west"></i></span>
+            <h3>سرورهای عمومی</h3>
+            <span class="mv-eng-card2-end">${fa(st.mine.length)}<i class="ph-bold ph-caret-left"></i></span>
+          </button>
+          <button type="button" class="mv-eng-card2-act" data-ov-act="refresh"
+                  title="به‌روزرسانی فهرست" aria-label="به‌روزرسانی فهرست" ${st.busy || sweep() ? 'disabled' : ''}>
+            <i class="${st.busy ? 'mv-spin-ring' : 'ph-bold ph-arrows-clockwise'}"></i>
+          </button>
+        </div>
+        <div class="mv-eng-card2-body">
+          <div class="ov-kv"><span>فهرست من / آرشیو</span><b>${fa(st.mine.length)} / ${fa(st.archive.length)}</b></div>
+          <div class="ov-kv"><span>آخرین به‌روزرسانی</span><b${stale ? ' style="color:var(--mv-orange-ink)"' : ''}>${p.fetchedAt ? esc(ago(p.fetchedAt)) : (p.source === 'bundled' ? 'فهرست همراه برنامه' : 'هنوز نه')}</b></div>
+          <div class="ov-kv"><span>تأییدشده با «تست واقعی»</span><b>${proven ? fa(proven) + ' سرور' : 'هنوز هیچ'}</b></div>
+          ${st.hidden.length ? `
+          <div class="ov-card-act">
+            <button type="button" class="mv-btn mv-btn--sm" data-ov-act="restore" title="سرورهایی که حذف کرده‌اید دیگر در فهرست ظاهر نمی‌شوند، حتی اگر VPN Gate دوباره منتشرشان کند. این دکمه همهٔ آن‌ها را یک‌جا برمی‌گرداند.">
+              <i class="ph-bold ph-arrow-counter-clockwise"></i>بازگرداندن ${fa(st.hidden.length)} سرور حذف‌شده</button>
+          </div>` : ''}
+        </div>
+        <div class="mv-eng-card2-foot">${!p.canRefresh
+            ? 'سایت فهرست از ایران همیشه باز نیست. <b>برای به‌روزرسانی، یک حساب کلادفلر در بخش ابری اضافه کنید</b> (فهرست از راه ورکر خودتان گرفته می‌شود) <b>یا یکی از تونل‌های برنامه را روشن کنید</b>.'
+            : stale
+                ? 'فهرست شما کهنه است. VPN Gate سرورهایش را مدام عوض می‌کند، پس بیشتر این‌ها دیگر جواب نمی‌دهند.'
+                : 'هر به‌روزرسانی فهرست را <b>بزرگ‌تر</b> می‌کند، نه اینکه جایش را بگیرد — سرورهای قدیمی در «آرشیو» می‌مانند.'}</div>
       </div>
 
       <div class="mv-eng-card2" style="--tint:var(--mv-orange)">
-        <div class="mv-eng-card2-head" style="cursor:default">
-          <span class="mv-eng-glyph"><i class="ph-fill ph-sliders-horizontal"></i></span>
-          <h3>مسیر عبور</h3>
-          <span class="mv-eng-card2-end">${frontLabel()}</span>
-        </div>
+        <button type="button" class="mv-eng-card2-head" data-ov-go="tunnelbear">
+          <span class="mv-eng-glyph"><i class="ph-fill ph-paw-print"></i></span>
+          <h3>TunnelBear و پروفایل‌ها</h3>
+          <span class="mv-eng-card2-end">${P.loaded ? fa(P.profiles.length) : '—'}<i class="ph-bold ph-caret-left"></i></span>
+        </button>
         <div class="mv-eng-card2-body">
-          ${frontOptions().map((o) => `
-          <button type="button" class="mv-form-row is-action${st.front === o.id ? ' is-on' : ''}"
-                  data-ov-front="${esc(String(o.id))}" aria-pressed="${st.front === o.id}"
-                  ${s.connected || s.connecting ? 'disabled' : ''}>
-            <span class="mv-row-mark"><i class="${st.front === o.id ? 'ph-fill ph-check-circle' : 'ph-bold ph-circle'}"></i></span>
-            <span class="mv-form-label">${esc(o.label)}<small>${o.hint}</small></span>
-          </button>`).join('')}
-          ${st.hidden.length ? `
-          <button type="button" class="mv-form-row is-action" data-ov-act="restore">
-            <span class="mv-row-mark"><i class="ph-fill ph-arrow-counter-clockwise"></i></span>
-            <span class="mv-form-label">بازگرداندن ${fa(st.hidden.length)} سرور حذف‌شده<small>سرورهایی که حذف کرده‌اید دیگر در فهرست ظاهر نمی‌شوند، حتی اگر VPN Gate دوباره منتشرشان کند. این دکمه همهٔ آن‌ها را یک‌جا برمی‌گرداند.</small></span>
-          </button>` : ''}
+          <div class="ov-kv"><span>حساب TunnelBear</span><b dir="${active ? 'ltr' : 'rtl'}">${active ? esc(active.username) : 'ندارید'}</b></div>
+          <div class="ov-kv"><span>پروفایل‌های خودتان</span><b>${P.loaded ? (own ? fa(own) + ' پروفایل' : 'هنوز هیچ') : '—'}</b></div>
+          ${!active && P.loaded ? `
+          <div class="ov-card-act"><button type="button" class="mv-btn mv-btn--sm" data-ov-act="add-account"><i class="ph-bold ph-plus"></i>افزودن حساب TunnelBear</button></div>` : ''}
         </div>
-        <div class="mv-eng-card2-foot">${frontWords(s)}</div>
+        <div class="mv-eng-card2-foot">${active && active.auth === 'failed'
+            ? '<b style="color:var(--mv-red-ink)">سرور TunnelBear حساب انتخاب‌شده را نپذیرفت.</b> رمز را در «حساب‌ها» بررسی کنید.'
+            : 'سرورهای TunnelBear با حساب خودتان وصل می‌شوند؛ پروفایل‌های خودتان را از «پروفایل‌های من» اضافه کنید.'}</div>
       </div>
 
-      <div class="mv-eng-card2" style="--tint:var(--mv-label-2)">
+      <div class="mv-eng-card2" style="--tint:var(--mv-gray)">
         <button type="button" class="mv-eng-card2-head" data-ov-go="log">
           <span class="mv-eng-glyph"><i class="ph-fill ph-terminal-window"></i></span>
           <h3>گزارش</h3>
           <span class="mv-eng-card2-end">${st.log.length ? fa(st.log.length) + ' خط' : '—'}<i class="ph-bold ph-caret-left"></i></span>
         </button>
         <div class="mv-eng-card2-body">
-          <div class="mv-eng-card2-foot" style="padding-top:6px" dir="ltr">${lastLog ? esc(lastLog) : '<span dir="rtl">هنوز چیزی ثبت نشده.</span>'}</div>
+          <div class="ov-card-line" dir="ltr" style="font-family:var(--mv-font-mono);font-size:11px">${lastLog ? esc(lastLog) : '<span dir="rtl" style="font-family:var(--mv-font)">هنوز چیزی ثبت نشده.</span>'}</div>
         </div>
         <div class="mv-eng-card2-foot">وقتی اتصال نگیرد، این تنها جایی است که می‌گوید دقیقاً کجا ایستاد.</div>
       </div>`;
-    }
-
-    /**
-     * The front choices. «خودکار» first, because it is the one that works without being told.
-     *
-     * Every front the app has running appears as its own row, so a user who already has تور or
-     * گف up can pin that instead of having سایفون started beside it.
-     */
-    function frontOptions() {
-        const out = [{
-            id: 'auto',
-            label: 'خودکار',
-            hint: 'اگر فرانتی روشن است از همان رد می‌شود؛ وگرنه خودش سایفون را بالا می‌آورد. روی خط ایران این تنها حالتی است که جواب می‌دهد.',
-        }];
-        for (const f of st.fronts || []) {
-            out.push({
-                id: f.port,
-                label: 'از ' + f.name,
-                hint: 'روی پورت ' + fa(f.port) + ' — همین موتور الان روشن است و اتصال از داخل آن می‌رود.',
-            });
-        }
-        out.push({
-            id: 'none',
-            label: 'بدون فرانت (مستقیم)',
-            hint: 'بدون واسطه، مستقیم به سرور. <b>سریع‌ترین حالت</b> — اگر خط شما OpenVPN را نبندد. روی خطوطی که می‌بندند، دست‌دادن بعد از تأیید گواهی سرور قطع می‌شود و اتصال برقرار نمی‌شود؛ یک‌بار امتحانش ضرری ندارد و جوابش را همین‌جا می‌بینید.',
-        });
-        return out;
-    }
-
-    function frontLabel() {
-        if (st.front === 'none') return 'مستقیم';
-        if (st.front === 'auto') return 'خودکار';
-        const f = (st.fronts || []).find((x) => x.port === st.front);
-        return f ? 'از ' + f.name : 'پورت ' + fa(st.front);
-    }
-
-    /**
-     * What to say under the picker — about the SESSION, not about the choice.
-     *
-     * The choice and what is actually carrying the bytes are two different facts, and on this
-     * engine they differ often: «خودکار» with no front running means one gets STARTED at connect,
-     * which the user should be told about rather than discover.
-     */
-    function frontWords(s) {
-        if (s.connected) {
-            return s.via
-                ? `این نشست از <b>${esc(s.via)}</b> رد می‌شود${s.viaStarted ? ' — همین پنجره بالا آوردش' : ''}. برای تغییر مسیر، اول اتصال را قطع کنید.`
-                : 'این نشست مستقیم از خط شما رد می‌شود. برای تغییر مسیر، اول اتصال را قطع کنید.';
-        }
-        if (st.front === 'none') {
-            return 'مستقیم انتخاب شده. اگر اتصال سر «دست‌دادن نیمه‌کاره ماند» ایستاد، علتش همین است نه سرور — «خودکار» را بزنید.';
-        }
-        if (st.front === 'auto') {
-            const cost = ' <b>توجه:</b> این یعنی تونل در تونل و سرعت را پایین می‌آورد — اگر خط شما OpenVPN را نمی‌بندد «مستقیم» را بزنید.';
-            return ((st.fronts || []).length
-                ? `فرانت آماده: <b>${esc(st.fronts.map((f) => f.name).join('، '))}</b>. اتصال از داخل آن می‌رود.`
-                : 'هیچ فرانتی روشن نیست؛ با زدن دکمهٔ اتصال، سایفون خودش بالا می‌آید و بعد OpenVPN از داخلش وصل می‌شود.') + cost;
-        }
-        const live = (st.fronts || []).some((x) => x.port === st.front);
-        return live
-            ? 'این فرانت روشن است و اتصال از داخل آن می‌رود.'
-            : 'این فرانت الان روشن نیست. یا خودش را روشن کنید، یا «خودکار» را بزنید تا برنامه یکی را بالا بیاورد.';
     }
 
     /** Rows we could not dial at all, because we have never seen their OpenVPN port. */
@@ -793,6 +936,8 @@
         return rows.filter(r => (st.pings[r.host] || 0) > 0).map(r => r.host);
     }
 
+    const summaryText = (rows) => `${fa(rows.length)} از ${fa(st.scope === 'mine' ? st.mine.length : st.archive.length)} سرور · ${(SORTS.find(x => x.id === st.sort) || {}).label || ''}`;
+
     function renderTools() {
         const host = $('ov-tools');
         if (!host) return;
@@ -806,34 +951,35 @@
         const dead = deadOf(rows);
 
         host.innerHTML = `
-      <div class="ov-search">
-        <i class="ph ph-magnifying-glass"></i>
-        <input type="search" id="ov-q" placeholder="جست‌وجوی کشور یا نام سرور" spellcheck="false" value="${esc(st.query)}">
-        ${st.query ? '<button type="button" id="ov-q-clear" aria-label="پاک کردن"><i class="ph-bold ph-x"></i></button>' : ''}
+      <div class="ov-bar1">
+        <label class="mv-search">
+          <i class="ph ph-magnifying-glass"></i>
+          <input type="search" class="mv-field" id="ov-q" placeholder="جست‌وجوی کشور یا نام سرور" spellcheck="false" value="${esc(st.query)}">
+          ${st.query ? '<button type="button" id="ov-q-clear" aria-label="پاک کردن"><i class="ph-bold ph-x"></i></button>' : ''}
+        </label>
+        <div class="mv-seg" role="tablist" aria-label="کدام فهرست">
+          <button type="button" role="tab" data-ov-scope="mine" aria-pressed="${st.scope === 'mine'}">فهرست من · ${fa(st.mine.length)}</button>
+          <button type="button" role="tab" data-ov-scope="archive" aria-pressed="${st.scope === 'archive'}">آرشیو · ${fa(st.archive.length)}</button>
+        </div>
       </div>
 
-      <div class="ov-row-1">
-        <div class="ov-chips" role="tablist">
-          <button type="button" class="ov-chip${st.scope === 'mine' ? ' is-on' : ''}" data-ov-scope="mine">فهرست من · ${fa(st.mine.length)}</button>
-          <button type="button" class="ov-chip${st.scope === 'archive' ? ' is-on' : ''}" data-ov-scope="archive">آرشیو · ${fa(st.archive.length)}</button>
-        </div>
-        <div class="ov-tb">
-          <button type="button" data-ov-act="refresh" ${busy ? 'disabled' : ''} title="${p.canRefresh ? 'گرفتن فهرست تازه' : 'اول یکی از تونل‌های برنامه را روشن کنید'}">
-            <i class="${st.busy ? 'mv-spin-ring' : 'ph-bold ph-arrows-clockwise'}"></i>به‌روز</button>
-          ${sw ? `<button type="button" data-ov-act="stop" class="is-stop"><i class="ph-bold ph-stop-circle"></i>توقف تست</button>`
-            : `<button type="button" data-ov-act="ping" ${busy || !rows.length ? 'disabled' : ''}><i class="ph-bold ph-gauge"></i>پینگ</button>
-               <button type="button" data-ov-act="probe" ${busy || !rows.length ? 'disabled' : ''}><i class="ph-bold ph-pulse"></i>تست واقعی</button>`}
-          <button type="button" data-ov-go="countries" class="${st.countries.length ? 'is-on' : ''}"><i class="ph-bold ph-globe-hemisphere-west"></i>کشور</button>
-          <button type="button" data-ov-go="sort" class="${st.sort !== 'verified' ? 'is-on' : ''}"><i class="ph-bold ph-sort-ascending"></i>مرتب‌سازی</button>
-          ${dead.length ? `<button type="button" data-ov-act="remove-dead" class="is-bad" ${busy ? 'disabled' : ''}
-                  title="سرورهایی که در تست رد شدند یا جواب ندادند"><i class="ph-bold ph-trash"></i>حذف خراب‌ها · ${fa(dead.length)}</button>` : ''}
-          <button type="button" data-ov-act="select" class="${st.selecting ? 'is-on' : ''}"><i class="ph-bold ph-check-square"></i>انتخاب</button>
-          <button type="button" data-ov-go="guide"><i class="ph-bold ph-question"></i>راهنما</button>
-        </div>
+      <div class="ov-tb">
+        <button type="button" data-ov-act="refresh" ${busy ? 'disabled' : ''} title="${p.canRefresh ? 'گرفتن فهرست تازه' : 'اول یک حساب کلادفلر اضافه کنید یا یکی از تونل‌های برنامه را روشن کنید'}">
+          <i class="${st.busy ? 'mv-spin-ring' : 'ph-bold ph-arrows-clockwise'}"></i>به‌روز</button>
+        ${sw ? `<button type="button" data-ov-act="stop" class="is-stop"><i class="ph-bold ph-stop-circle"></i>توقف تست</button>`
+            : `<button type="button" data-ov-act="ping" ${busy || !rows.length ? 'disabled' : ''} title="فقط زمان رسیدن بسته به سرور"><i class="ph-bold ph-gauge"></i>پینگ</button>
+        <button type="button" data-ov-act="probe" class="is-go" ${busy || !rows.length ? 'disabled' : ''} title="یک اتصال کامل OpenVPN به هر سرور — تنها تستی که می‌گوید وصل می‌شود"><i class="ph-bold ph-pulse"></i>تست واقعی</button>`}
+        <span class="ov-tb-sep"></span>
+        <button type="button" data-ov-go="countries" aria-pressed="${st.countries.length > 0}"><i class="ph-bold ph-globe-hemisphere-west"></i>کشور${st.countries.length ? ' · ' + fa(st.countries.length) : ''}</button>
+        <button type="button" data-ov-go="sort" aria-pressed="${st.sort !== 'verified'}"><i class="ph-bold ph-sort-ascending"></i>مرتب‌سازی</button>
+        <button type="button" data-ov-act="select" aria-pressed="${st.selecting}"><i class="ph-bold ph-check-square"></i>انتخاب</button>
+        ${dead.length ? `<button type="button" data-ov-act="remove-dead" class="is-bad" ${busy ? 'disabled' : ''}
+                title="سرورهایی که در تست رد شدند یا جواب ندادند"><i class="ph-bold ph-trash"></i>حذف خراب‌ها · ${fa(dead.length)}</button>` : ''}
       </div>
 
       ${sw ? `
       <div class="ov-sweep">
+        <i class="mv-spin-ring"></i>
         <span>${sw.kind === 'probe' ? 'تست واقعی' : 'پینگ'} — ${fa(sw.done)} از ${fa(sw.total)}</span>
         <span class="ov-bar"><i style="width:${sw.total ? Math.round(sw.done / sw.total * 100) : 0}%"></i></span>
         <span class="ov-num">${fa(sw.total ? Math.round(sw.done / sw.total * 100) : 0)}٪</span>
@@ -842,9 +988,9 @@
       ${st.selecting ? renderBulk(rows) : ''}
 
       <div class="ov-summary">
-        <span>${fa(rows.length)} از ${fa(st.scope === 'mine' ? st.mine.length : st.archive.length)} سرور · ${esc((SORTS.find(x => x.id === st.sort) || {}).label || '')}</span>
-        ${dead.length ? `<span>${fa(dead.length)} سرور در تست رد شده</span>` : ''}
-        ${st.countries.length ? `<button type="button" data-ov-act="clear-countries">برداشتن فیلتر کشور (${fa(st.countries.length)})</button>` : ''}
+        <span>${summaryText(rows)}</span>
+        ${dead.length ? `<span>· ${fa(dead.length)} سرور در تست رد شده</span>` : ''}
+        ${st.countries.length ? `<button type="button" data-ov-act="clear-countries"><i class="ph-bold ph-x"></i> برداشتن فیلتر کشور (${fa(st.countries.length)})</button>` : ''}
       </div>`;
     }
 
@@ -854,78 +1000,106 @@
         const n = st.checked.length;
         return `
       <div class="ov-bulk">
-        <b>${n ? fa(n) + ' سرور انتخاب شده' : 'چیزی انتخاب نشده'}</b>
-        <div class="ov-bulk-acts">
-          <button type="button" data-ov-act="check-healthy" ${healthy.length ? '' : 'disabled'}>سالم‌ها (${fa(healthy.length)})</button>
+        <b>${n ? fa(n) + ' سرور انتخاب شده' : 'روی سرورها بزنید تا تیک بخورند'}</b>
+        <div class="ov-tb">
+          <button type="button" data-ov-act="check-healthy" ${healthy.length ? '' : 'disabled'}><i class="ph-bold ph-check-circle"></i>سالم‌ها (${fa(healthy.length)})</button>
           ${st.scope === 'archive'
-                ? `<button type="button" data-ov-act="keep" ${n ? '' : 'disabled'}>افزودن به فهرست من</button>`
-                : `<button type="button" data-ov-act="drop" ${n ? '' : 'disabled'}>برداشتن از فهرست من</button>`}
-          <button type="button" data-ov-act="remove-checked" class="is-bad" ${n ? '' : 'disabled'}>حذف (${fa(n)})</button>
+                ? `<button type="button" data-ov-act="keep" ${n ? '' : 'disabled'}><i class="ph-bold ph-bookmark-simple"></i>افزودن به فهرست من</button>`
+                : `<button type="button" data-ov-act="drop" ${n ? '' : 'disabled'}><i class="ph-bold ph-bookmark-simple"></i>برداشتن از فهرست من</button>`}
+          <button type="button" data-ov-act="remove-checked" class="is-bad" ${n ? '' : 'disabled'}><i class="ph-bold ph-trash"></i>حذف (${fa(n)})</button>
           <button type="button" data-ov-act="remove-dead" class="is-bad" ${dead.length ? '' : 'disabled'}>حذف سرورهای قطع (${fa(dead.length)})</button>
         </div>
       </div>`;
     }
 
+    /** The table's sortable columns: the header a person clicks → the sort it means. */
+    const COLS = { server: 'country', speed: 'speed', sess: 'sessions', score: 'score', result: 'verified' };
+
+    function th(key, label, cls) {
+        const sortId = COLS[key];
+        const on = st.sort === sortId;
+        return `<th class="${cls || ''}${on ? ' is-sorted' : ''}" data-sortcol="${sortId}" title="مرتب‌سازی بر اساس ${label}">${label}${on ? '<i class="ph-bold ph-caret-down ov-arrow"></i>' : ''}</th>`;
+    }
+
     function renderServers() {
         const host = $('ov-servers');
         if (!host) return;
-        const s = (st.payload && st.payload.status) || {};
+        const s = status();
         const rows = visible();
         const note = $('ov-list-note');
 
         if (note) {
             note.innerHTML = st.scope === 'mine'
-                ? 'همان فهرستی که دکمهٔ اتصال از آن انتخاب می‌کند: سرورهای زندهٔ همین حالا، به‌علاوهٔ هرچه خودتان از آرشیو اضافه کرده‌اید، منهای هرچه حذف کرده‌اید.'
-                : 'هر سروری که برنامه تا امروز دیده. با هر «به‌روز» بزرگ‌تر می‌شود. سرورهای اینجا تا وقتی به «فهرست من» اضافه‌شان نکنید در دکمهٔ اتصال ظاهر نمی‌شوند.';
+                ? 'همان فهرستی که دکمهٔ اتصال از آن انتخاب می‌کند: سرورهای زندهٔ همین حالا، به‌علاوهٔ هرچه خودتان از آرشیو اضافه کرده‌اید، منهای هرچه حذف کرده‌اید. روی یک سرور بزنید تا مقصد اتصال شود.'
+                : 'هر سروری که برنامه تا امروز دیده. با هر «به‌روز» بزرگ‌تر می‌شود. سروری که از اینجا انتخاب کنید خودش به «فهرست من» هم اضافه می‌شود.';
         }
 
         if (!rows.length) {
-            host.innerHTML = `<div class="mv-form-row is-stack"><span class="mv-form-label">${emptyTitle()}<small>${emptyBody()}</small></span></div>`;
+            host.innerHTML = `<div class="mv-empty"><i class="ph ph-globe-hemisphere-west mv-empty-ic"></i><b>${emptyTitle()}</b><p>${emptyBody()}</p></div>`;
             return;
         }
 
         const locked = st.busy || s.connecting;
-        const keptSet = st.kept;
-        host.innerHTML = rows.map((r) => {
-            const on = st.selected === r.host;
-            const live = s.connected && s.host === r.host;
+        const aimed = st.target.kind === 'gate';
+        host.innerHTML = `
+      <div class="mv-table-wrap">
+        <table class="mv-table ov-table">
+          <thead><tr>
+            <th class="ov-c-mark"></th>
+            ${th('server', 'سرور')}
+            ${th('speed', 'پهنای باند', 'ov-c-speed')}
+            ${th('sess', 'نشست', 'ov-c-sess')}
+            ${th('score', 'امتیاز', 'ov-c-score')}
+            ${th('result', 'نتیجه')}
+            <th class="ov-c-act"></th>
+          </tr></thead>
+          <tbody>${rows.map((r) => {
+            const on = aimed && st.selected === r.host;
+            const live = isLive('gate', r.host);
             const checked = has(st.checked, r.host);
             const mark = st.selecting
                 ? `<span class="ov-mark${checked ? ' is-on' : ''}"><i class="${checked ? 'ph-fill ph-check-square' : 'ph ph-square'}"></i></span>`
-                : (st.scope === 'archive' && has(keptSet, r.host))
-                    ? '<span class="ov-mark is-on" title="در فهرست من"><i class="ph-fill ph-bookmark-simple"></i></span>'
-                    : `<span class="ov-mark${on ? ' is-on' : ''}"><i class="${on ? 'ph-fill ph-check-circle' : 'ph ph-circle'}"></i></span>`;
+                : live ? '<span class="ov-mark is-live" title="همین حالا وصل است"><i class="ph-fill ph-check-circle"></i></span>'
+                    : (st.scope === 'archive' && has(st.kept, r.host))
+                        ? '<span class="ov-mark is-on" title="در فهرست من"><i class="ph-fill ph-bookmark-simple"></i></span>'
+                        : `<span class="ov-mark${on ? ' is-on' : ''}"><i class="${on ? 'ph-fill ph-check-circle' : 'ph ph-circle'}"></i></span>`;
             return `
-        <div class="mv-form-row" style="padding:0">
-          <button type="button" class="ov-srow" data-host="${esc(r.host)}"${locked ? ' disabled' : ''}
-                  role="radio" aria-checked="${on}">
-            ${mark}
-            ${flag(r.cc, 20)}
-            <span class="ov-txt">
-              <b>${esc(countryName(r.cc) || r.country)}${r.official ? ' · رسمی' : ''} <code>${esc(shortName(r.host))}</code></b>
-              <small${live ? ' class="is-on"' : ''}>${live ? 'همین حالا وصل است — ' : ''}${fa(r.speedMbps)} مگابیت · ${fa(r.sessions)} نشست</small>
-            </span>
-            <span class="ov-end">${badgeFor(r.host)}</span>
-          </button>
-          <button type="button" class="ov-open" data-detail="${esc(r.host)}" title="صفحهٔ این سرور" aria-label="صفحهٔ این سرور"><i class="ph-bold ph-info"></i></button>
-        </div>`;
-        }).join('');
+            <tr class="ov-tr${live ? ' is-on' : on ? ' is-sel' : ''}${locked ? ' is-locked' : ''}" data-host="${esc(r.host)}" tabindex="0"
+                role="${st.selecting ? 'checkbox' : 'radio'}" aria-checked="${st.selecting ? checked : on}">
+              <td class="ov-c-mark">${mark}</td>
+              <td>
+                <span class="ov-srv">${flag(r.cc, 22)}
+                  <span class="ov-srv-t">
+                    <b>${esc(countryName(r.cc) || r.country)}${r.official ? '<span class="ov-pill is-tag">رسمی</span>' : ''}</b>
+                    ${live ? '<small class="is-live">همین حالا وصل است</small>' : `<small dir="ltr">${esc(shortName(r.host))}</small>`}
+                  </span>
+                </span>
+              </td>
+              <td class="ov-c-num ov-c-speed">${fa(r.speedMbps)} مگابیت</td>
+              <td class="ov-c-num ov-c-sess">${fa(r.sessions)}</td>
+              <td class="ov-c-num ov-c-score">${fa(r.score)}</td>
+              <td>${badgeFor(r.host)}</td>
+              <td class="ov-c-act"><button type="button" class="mv-btn mv-btn--icon mv-btn--sm" data-detail="${esc(r.host)}" title="صفحهٔ این سرور" aria-label="صفحهٔ این سرور"><i class="ph-bold ph-info"></i></button></td>
+            </tr>`;
+        }).join('')}</tbody>
+        </table>
+      </div>`;
     }
 
     function badgeFor(host) {
         const p = st.probes[host];
         if (p && p.ok) {
             const b = probeBand(p.ms);
-            return `<span class="ov-badge is-${b.tone}">${b.word}</span>`;
+            return `<span class="ov-pill is-${b.tone}">${b.word}</span>`;
         }
-        if (p) return `<span class="ov-badge is-bad">${PROBE_FAIL[p.reason] || 'رد شد'}</span>`;
+        if (p) return `<span class="ov-pill is-bad">${PROBE_FAIL[p.reason] || 'رد شد'}</span>`;
         const g = st.pings[host];
-        if (g > 0) return `<span class="ov-badge ov-num">${fa(g)}ms</span>`;
-        if (g !== undefined) return '<span class="ov-badge is-bad">بی‌پاسخ</span>';
+        if (g > 0) return `<span class="ov-pill ov-num">${fa(g)}ms</span>`;
+        if (g !== undefined) return '<span class="ov-pill is-bad">بی‌پاسخ</span>';
         // NOT «تست نشده» and never «رد شد»: we have no profile for this relay, so no port to
         // knock on. A guess at 443 is what made hundreds of working volunteer relays look dead.
-        if (noPort(host)) return '<span class="ov-badge" title="پورت OpenVPN این سرور را نداریم. «به‌روزرسانی فهرست» پورت هر سرور را می‌آورد.">پورت نامعلوم</span>';
-        return '<span class="ov-badge">تست نشده</span>';
+        if (noPort(host)) return '<span class="ov-pill" title="پورت OpenVPN این سرور را نداریم. «به‌روز» پورت هر سرور را می‌آورد.">پورت نامعلوم</span>';
+        return '<span class="ov-pill">تست نشده</span>';
     }
 
     function emptyTitle() {
@@ -952,32 +1126,27 @@
             .map(([cc, n]) => ({ cc, n, name: countryName(cc) }))
             .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name, 'fa'));
 
-        const head = $('ov-country-head');
-        if (head) head.textContent = `کشور — ${fa(list.length)} کشور در ${st.scope === 'mine' ? 'فهرست من' : 'آرشیو'}`;
-
         const tools = $('ov-country-tools');
         if (tools) {
             tools.innerHTML = `
-        <div class="ov-row-1">
-          <div class="ov-tb" style="margin-inline-start:0">
-            <button type="button" data-ov-act="clear-countries" ${st.countries.length ? '' : 'disabled'}>
-              <i class="ph-bold ph-x"></i>همهٔ کشورها</button>
+        <div class="ov-bar1">
+          <div class="ov-summary" style="margin:0">${fa(list.length)} کشور در ${st.scope === 'mine' ? 'فهرست من' : 'آرشیو'} · ${st.countries.length ? fa(st.countries.length) + ' کشور انتخاب شده' : 'بدون فیلتر'}</div>
+          <div class="ov-tb" style="margin-inline-start:auto">
+            <button type="button" data-ov-act="clear-countries" ${st.countries.length ? '' : 'disabled'}><i class="ph-bold ph-x"></i>همهٔ کشورها</button>
+            <button type="button" data-ov-go="servers" class="is-go"><i class="ph-bold ph-check"></i>نمایش سرورها</button>
           </div>
-          <span class="ov-summary" style="margin-inline-start:auto">${st.countries.length ? fa(st.countries.length) + ' کشور انتخاب شده' : 'بدون فیلتر'}</span>
         </div>`;
         }
 
         host.innerHTML = list.map((c) => {
             const on = has(st.countries, c.cc);
             return `
-        <div class="mv-form-row" style="padding:0">
-          <button type="button" class="ov-crow" data-cc="${esc(c.cc)}" role="checkbox" aria-checked="${on}">
-            <span class="ov-mark${on ? ' is-on' : ''}"><i class="${on ? 'ph-fill ph-check-square' : 'ph ph-square'}"></i></span>
-            ${flag(c.cc, 20)}
-            <span class="ov-cname">${esc(c.name)}</span>
-            <small>${fa(c.n)}</small>
-          </button>
-        </div>`;
+        <button type="button" class="mv-li${on ? ' is-sel' : ''}" data-cc="${esc(c.cc)}" role="checkbox" aria-checked="${on}">
+          <span class="mv-li-lead"><span class="ov-mark${on ? ' is-on' : ''}"><i class="${on ? 'ph-fill ph-check-square' : 'ph ph-square'}"></i></span></span>
+          ${flag(c.cc, 22)}
+          <span class="mv-li-text"><b>${esc(c.name)}</b></span>
+          <span class="mv-li-num">${fa(c.n)}</span>
+        </button>`;
         }).join('');
     }
 
@@ -1012,19 +1181,34 @@
         const p = st.probes[r.host];
         const g = st.pings[r.host];
         const kept = has(st.kept, r.host);
-        const isSel = st.selected === r.host;
+        const isSel = st.target.kind === 'gate' && st.selected === r.host;
+        const live = isLive('gate', r.host);
 
-        const kv = (k, v) => `<div class="mv-form-row"><span class="mv-form-label">${k}</span><span class="mv-row-end" dir="auto">${v}</span></div>`;
+        // .mv-form-value, not .mv-row-end: the latter is the kit's 18px icon slot, and a value set in
+        // it came out larger and greyer than its own label.
+        const kv = (k, v) => `<div class="mv-form-row"><span class="mv-form-label">${k}</span><span class="mv-form-value ov-val" dir="auto">${v}</span></div>`;
 
         host.innerHTML = `
+    <div class="ov-dhead">
+      ${flag(r.cc, 48)}
+      <div>
+        <h2>${esc(countryName(r.cc) || r.country)}</h2>
+        <p><code>${esc(shortName(r.host))}</code>${r.official ? '<span class="ov-pill is-tag">رسمی</span>' : '<span class="ov-pill is-tag">داوطلبانه</span>'}${badgeFor(r.host)}${live ? '<span class="ov-pill is-ok">وصل است</span>' : ''}</p>
+      </div>
+      <div class="ov-dhead-act">
+        <button type="button" class="mv-btn${isSel ? '' : ' mv-btn--primary'}" data-ov-act="detail-select" ${isSel ? 'disabled' : ''}><i class="${isSel ? 'ph-fill ph-check-circle' : 'ph-bold ph-circle'}"></i>${isSel ? 'مقصد اتصال است' : 'انتخاب برای اتصال'}</button>
+        <button type="button" class="mv-btn" data-ov-act="detail-keep"><i class="${kept ? 'ph-fill' : 'ph-bold'} ph-bookmark-simple"></i>${kept ? 'برداشتن از فهرست من' : 'افزودن به فهرست من'}</button>
+        <button type="button" class="mv-btn mv-btn--danger" data-ov-act="detail-remove"><i class="ph-bold ph-trash"></i>حذف این سرور</button>
+      </div>
+    </div>
     <div class="mv-form">
       <div class="mv-form-section">
-        <div class="mv-form-header">${flag(r.cc, 22)} ${esc(countryName(r.cc) || r.country)} · <code>${esc(shortName(r.host))}</code></div>
+        <div class="mv-form-header">اندازه‌گیری روی خط شما</div>
         <div class="mv-form-group">
-          ${kv('پینگ', g === undefined ? 'تست نشده' : g > 0 ? `<span class="ov-num">${fa(g)}ms</span>` : '<span style="color:var(--mv-orange)">بی‌پاسخ</span>')}
+          ${kv('پینگ', g === undefined ? 'تست نشده' : g > 0 ? `<span class="ov-num">${fa(g)}ms</span>` : '<span style="color:var(--mv-orange-ink)">بی‌پاسخ</span>')}
           ${kv('تست واقعی', !p ? 'تست نشده'
-                : p.ok ? `<span style="color:var(--mv-green-ink,var(--mv-green))">${probeBand(p.ms).word} · <span class="ov-num">${fa(p.ms)}ms</span></span>`
-                    : `<span style="color:var(--mv-red-ink,var(--mv-red))">${PROBE_FAIL[p.reason] || 'رد شد'}</span>`)}
+                : p.ok ? `<span style="color:var(--mv-green-ink)">${probeBand(p.ms).word} · <span class="ov-num">${fa(p.ms)}ms</span></span>`
+                    : `<span style="color:var(--mv-red-ink)">${PROBE_FAIL[p.reason] || 'رد شد'}</span>`)}
           ${p && p.at ? kv('زمان تست', esc(ago(p.at))) : ''}
         </div>
         <div class="mv-form-footer">پینگ فقط می‌گوید بسته چقدر طول می‌کشد به سرور برسد. «تست واقعی» دست‌دادن کامل را با سرور انجام می‌دهد؛ نتیجهٔ سبزش یعنی این سرور روی خط اینترنت شما واقعاً وصل می‌شود.</div>
@@ -1050,28 +1234,10 @@
       </div>
 
       ${r.message ? `
-      <div class="mv-form-section">
+      <div class="mv-form-section is-wide">
         <div class="mv-form-header">پیام گردانندهٔ سرور</div>
         <div class="mv-form-group"><div class="mv-form-row is-stack"><span class="mv-form-label" dir="auto" style="white-space:pre-wrap">${esc(r.message)}</span></div></div>
       </div>` : ''}
-
-      <div class="mv-form-section">
-        <div class="mv-form-header">کارها</div>
-        <div class="mv-form-group">
-          <button type="button" class="mv-form-row is-action" data-ov-act="detail-select" ${isSel ? 'disabled' : ''}>
-            <span class="mv-row-mark${isSel ? ' is-on' : ''}"><i class="${isSel ? 'ph-fill ph-check-circle' : 'ph ph-circle'}"></i></span>
-            <span class="mv-form-label">${isSel ? 'همین حالا انتخاب شده' : 'انتخاب برای اتصال'}</span>
-          </button>
-          <button type="button" class="mv-form-row is-action" data-ov-act="detail-keep">
-            <span class="mv-row-mark${kept ? ' is-on' : ''}"><i class="ph-fill ph-bookmark-simple"></i></span>
-            <span class="mv-form-label">${kept ? 'برداشتن از فهرست من' : 'افزودن به فهرست من'}</span>
-          </button>
-          <button type="button" class="mv-form-row is-action" data-ov-act="detail-remove">
-            <span class="mv-row-mark"><i class="ph-fill ph-trash" style="color:var(--mv-red)"></i></span>
-            <span class="mv-form-label" style="color:var(--mv-red-ink,var(--mv-red))">حذف این سرور</span>
-          </button>
-        </div>
-      </div>
     </div>`;
     }
 
@@ -1088,6 +1254,19 @@
 
         host.innerHTML = `
     <div class="mv-form">
+      <div class="mv-form-section">
+        <div class="mv-form-header">سه منبع، یک دکمه</div>
+        <div class="mv-form-group">
+          ${para('ph-fill ph-globe-hemisphere-west', 'var(--mv-indigo)', 'سرورهای عمومی',
+            'هزاران سرور داوطلبانهٔ VPN Gate، بدون حساب و بدون هزینه.')}
+          ${para('ph-fill ph-paw-print', 'var(--mv-orange)', 'TunnelBear',
+            'چهل‌وهفت کشور TunnelBear، با حساب خودتان (بخش «حساب‌ها»).')}
+          ${para('ph-fill ph-file-text', 'var(--mv-teal)', 'پروفایل‌های من',
+            'فایل‌های .ovpn خودتان، همراه با گواهی و کلیدشان.')}
+        </div>
+        <div class="mv-form-footer">در هر فهرست روی یک ردیف بزنید تا «مقصد اتصال» شود؛ بعد دکمهٔ بزرگ صفحهٔ «اتصال» یا دکمهٔ «اتصال» بالای هر صفحه به همان وصل می‌شود. ردیف سبز یعنی همین حالا وصل است، ردیف آبی یعنی انتخاب شده.</div>
+      </div>
+
       <div class="mv-form-section">
         <div class="mv-form-header">دو فهرست</div>
         <div class="mv-form-group">
@@ -1111,40 +1290,40 @@
       </div>
 
       <div class="mv-form-section">
-        <div class="mv-form-header">چرا این پنجره یک «مسیر عبور» دارد</div>
+        <div class="mv-form-header">اتصال مستقیم — و چرا یک رلهٔ محلی</div>
         <div class="mv-form-group">
-          ${para('ph-fill ph-arrow-bend-double-up-right', 'var(--mv-orange)', 'بعضی خط‌ها خودِ پروتکل OpenVPN را می‌بندند',
-            'روی یک خط خانگی در ایران اندازه گرفتیم — یک نمونه است، نه حکم دربارهٔ خط شما. ده سرور، ده پورت مختلف (۴۴۳، ۱۱۹۴، ۱۶۳۲، ۱۷۲۴، ۱۹۰۵ …): <b>TCP روی همه وصل شد</b> (۳ تا ۴ ثانیه) ولی دست‌دادن OpenVPN روی <b>هر ده</b> تا قطع شد — با اینکه گواهی خود سرور تأیید شده بود.\n\nیعنی سرورها سالم‌اند و پورت‌ها باز؛ چیزی که رد نمی‌شود <b>خود پروتکل</b> است. عوض کردن پورت هم فایده ندارد، چون فیلتر روی شکل دست‌دادن است نه روی شماره.')}
-          ${para('ph-fill ph-shield-check', 'var(--mv-green)', 'از داخل یک فرانت وصل می‌شود — ولی رایگان نیست',
-            'همان سرورها از داخل سایفون: وصل شدند، ۶٫۸ تا ۸٫۳ ثانیه.\n\n<b>ولی صادقانه: این یعنی تونل در تونل.</b> ترافیک شما اول داخل سایفون می‌رود و بعد داخل OpenVPN، و کندیِ هر دو روی هم سوار می‌شود. این اجتناب‌ناپذیر است، نه تنظیمی که جایی خاموش مانده باشد.\n\nاگر خط شما OpenVPN را نمی‌بندد، «مستقیم» را بزنید — نه فرانتی لازم است نه کندی‌اش.')}
+          ${para('ph-fill ph-arrow-bend-double-up-right', 'var(--mv-orange)', 'فیلتر شکل دست‌دادن OpenVPN را می‌شناسد',
+            'روی خط ایران، اتصال TCP به سرور برقرار می‌شود و گواهی سرور هم می‌رسد، ولی بعد اتصال قطع می‌شود. سرور سالم است و پورت باز؛ چیزی که فیلتر می‌شناسد <b>شکل رکوردهای اول</b> است، نه شمارهٔ پورت.')}
+          ${para('ph-fill ph-shield-check', 'var(--mv-green)', 'رلهٔ محلی: مستقیم، بدون تونل دوم',
+            'برنامه روی خود کامپیوتر شما یک رلهٔ کوچک باز می‌کند؛ OpenVPN به آن وصل می‌شود و رله <b>خودش مستقیم</b> به سرور وصل می‌شود و ۶ کیلوبایت اول را به تکه‌های کوچک و نامنظم می‌برد. همان روشی است که اندروید با آن سرورهای TunnelBear را وصل می‌کند.<br><br>اندازه‌گیری روی خط ایران (یک سرور رسمی VPN Gate، هر کدام دو بار): رلهٔ ساده که بایت‌ها را همان‌طور رد می‌کند — <b>هر دو بار قطع شد</b>؛ رلهٔ تکه‌تکه‌کننده — <b>هر دو بار در حدود ۵ ثانیه وصل شد</b>. هیچ سایفون یا موتور دیگری روشن نمی‌شود.')}
         </div>
-        <div class="mv-form-footer"><b>و اگر خطتان OpenVPN را می‌بندد، پنجرهٔ «گیت‌وی MLM» را ترجیح بدهید:</b> همین سرورها را با پروتکل خودش می‌گیرد که شکلش شبیه یک درخواست معمولی وب است، پس به فرانت نیاز ندارد و تونل در تونل نمی‌شود. دو موتور، دو مسیر — سرورها یکی. این پنجره برای خط‌هایی است که OpenVPN رویشان باز است، یا وقتی سرور فقط OpenVPN می‌دهد.</div>
+        <div class="mv-form-footer">سرورهای UDP از این رله رد نمی‌شوند (رله TCP است)؛ از ایران تقریباً همهٔ پورت‌های UDP سرورهای VPN Gate بسته اندازه گرفته شده‌اند، پس سرورهای TCP را ترجیح دهید.</div>
       </div>
 
       <div class="mv-form-section">
-        <div class="mv-form-header">کنترل‌ها</div>
+        <div class="mv-form-header">کنترل‌های فهرست سرورهای عمومی</div>
         <div class="mv-form-group">
           ${para('ph-fill ph-globe-hemisphere-west', 'var(--mv-blue)', 'کشور',
             'فهرست را به یک یا چند کشور محدود می‌کند. می‌توانید چند کشور را با هم انتخاب کنید — مثلاً برای اینکه یک قاره را یک‌جا تست بگیرید.')}
           ${para('ph-fill ph-sort-ascending', 'var(--mv-orange)', 'مرتب‌سازی',
-            'ترتیب فقط روی نمایش اثر دارد؛ هیچ سروری با آن حذف یا اضافه نمی‌شود. پیش‌فرض روی «تست‌شده‌ها اول» است.')}
+            'ترتیب فقط روی نمایش اثر دارد؛ هیچ سروری با آن حذف یا اضافه نمی‌شود. پیش‌فرض روی «تست‌شده‌ها اول» است. سرستون‌های جدول هم همین کار را می‌کنند.')}
           ${para('ph-fill ph-check-square', 'var(--mv-indigo)', 'انتخاب',
-            'با دکمهٔ «انتخاب» بالای صفحه چند سرور را با هم تیک می‌زنید تا یک‌جا به فهرستتان اضافه یا از آن حذف شوند.')}
+            'با دکمهٔ «انتخاب» چند سرور را با هم تیک می‌زنید تا یک‌جا به فهرستتان اضافه یا از آن حذف شوند.')}
           ${para('ph-fill ph-trash', 'var(--mv-red)', 'حذف سرورهای قطع',
-            'فقط سرورهایی را پاک می‌کند که تست شده‌اند و پاسخ نداده‌اند. سرورهای تست‌نشده هرگز حذف نمی‌شوند.')}
+            'فقط سرورهایی را پاک می‌کند که تست شده‌اند و پاسخ نداده‌اند. سرورهای تست‌نشده هرگز حذف نمی‌شوند. هرچه حذف شود از صفحهٔ «اتصال» برمی‌گردد.')}
         </div>
       </div>
 
       <div class="mv-form-section">
         <div class="mv-form-header">پیشنهاد</div>
         <div class="mv-form-group">
-          <div class="mv-form-row is-stack"><span class="mv-form-label">اولین بار «تست واقعی» را روی «فهرست من» بزنید و چند دقیقه صبر کنید، بعد اولین سرور سبز را انتخاب کنید. اگر <b>هیچ‌کدام</b> سبز نشد و همه «دست‌دادن نیمه‌کاره ماند» دادند، مشکل سرورها نیست — «مسیر عبور» را روی «خودکار» بگذارید و دوباره بگیرید. اگر باز هم نشد، به «آرشیو» بروید، یک کشور نزدیک را انتخاب کنید و همان تست را آنجا بگیرید.</span></div>
+          <div class="mv-form-row is-stack"><span class="mv-form-label">اولین بار «تست واقعی» را روی «فهرست من» بزنید و چند دقیقه صبر کنید، بعد اولین سرور سبز را انتخاب کنید. اگر <b>هیچ‌کدام</b> سبز نشد، «به‌روز» را بزنید تا فهرست و پورت سرورها تازه شود و دوباره تست بگیرید؛ اگر باز هم نشد، به «آرشیو» بروید، یک کشور نزدیک را انتخاب کنید و همان تست را آنجا بگیرید — یا TunnelBear را با حساب خودتان امتحان کنید.</span></div>
         </div>
       </div>
     </div>`;
     }
 
-    // ── the strip along the bottom ─────────────────────────────────────────
+    // ── the strip along the bottom, and the compact button in the title band ──
 
     function renderBar() {
         const host = $('ov-foot');
@@ -1156,12 +1335,31 @@
             : s.connected ? 'وصل — تونل کامل سیستم'
                 : s.connecting ? 'در حال برقراری نشست'
                     : !s.installed ? 'هستهٔ OpenVPN نصب نیست'
-                        : st.selected ? 'آمادهٔ اتصال' : 'سروری انتخاب نشده';
-        const sel = selectedRow();
+                        : targetInfo().ok ? 'آمادهٔ اتصال' : 'مقصدی انتخاب نشده';
+        const t = s.connected || s.connecting ? Object.assign(liveName(), { src: null }) : targetInfo();
+        const name = t.name || '';
         host.innerHTML = `
       ${ovDot(sw ? 'busy' : v.tone)}
       <span>${word}</span>
-      <span class="mv-eng-foot-end">${sel ? `<code dir="ltr">${esc(shortName(sel.host))}</code>` : ''}<span>${sel ? esc(countryName(sel.cc) || sel.country) : '—'}</span></span>`;
+      <span class="mv-eng-foot-end">${name ? `${t.cc ? flag(t.cc, 16) : ''}<span>${esc(name)}</span>` : '<span>—</span>'}</span>`;
+    }
+
+    /** One connect button is visible at any moment: the hero's, or this one — never both. */
+    function renderBarAction() {
+        const host = $('ov-bar-action');
+        if (!host) return;
+        if (ovSec === 'connect') { if (host.innerHTML) host.innerHTML = ''; return; }
+        const v = ovView();
+        const t = targetInfo();
+        let html;
+        if (v.act === 'off') {
+            html = `<button type="button" class="mv-btn" data-ov-act="power"><i class="${v.s.connecting ? 'mv-spin-ring' : 'ph-bold ph-power'}"></i>${v.s.connecting ? 'لغو' : 'قطع'}</button>`;
+        } else {
+            html = `<button type="button" class="mv-btn mv-btn--primary" data-ov-act="power" ${v.act && !st.busy ? '' : 'disabled'}
+                      title="${esc(t.ok ? 'اتصال به ' + t.name : (t.why || 'اول یک مقصد انتخاب کنید'))}">
+                      <i class="${st.busy ? 'mv-spin-ring' : 'ph-bold ph-power'}"></i>اتصال${t.ok ? ' به ' + esc(t.name.split(' · ')[0]) : ''}</button>`;
+        }
+        if (host.dataset.html !== html) { host.innerHTML = html; host.dataset.html = html; }
     }
 
     function renderLog() {
@@ -1191,14 +1389,14 @@
     function ovGoSec(id) {
         const wrap = $('ov-wrap');
         if (!wrap) return;
-        const known = OV_SECTIONS.some(x => x.id === id) || Object.prototype.hasOwnProperty.call(SUB, id);
+        const known = !!SECTION_OF[id] || Object.prototype.hasOwnProperty.call(SUB, id);
         ovSec = known ? id : 'connect';
         wrap.querySelectorAll('.mv-eng-sec').forEach((n) => n.classList.toggle('is-on', n.getAttribute('data-sec') === ovSec));
-        // A sub-page keeps «سرورها» lit in the sidebar: the user is still inside the list, they
-        // have merely opened one of its decisions.
+        // A sub-page keeps «سرورهای عمومی» lit in the sidebar: the user is still inside the list,
+        // they have merely opened one of its decisions.
         const lit = Object.prototype.hasOwnProperty.call(SUB, ovSec) ? 'servers' : ovSec;
         wrap.querySelectorAll('.mv-side-item[data-ov-sec]').forEach((b) => b.classList.toggle('active', b.getAttribute('data-ov-sec') === lit));
-        const found = OV_SECTIONS.find((x) => x.id === ovSec);
+        const found = SECTION_OF[ovSec];
         const title = $('ov-pane-title');
         if (title) title.textContent = found ? found.label : (SUB[ovSec] || '');
         const back = $('ov-back');
@@ -1232,8 +1430,24 @@
                 paint();
             };
         });
+        wrap.querySelectorAll('[data-ov-kind]').forEach((b) => {
+            b.onclick = () => {
+                const kind = b.getAttribute('data-ov-kind');
+                if (kind === st.target.kind) return;
+                // The source's own last choice comes back with it, so flipping between the three
+                // does not throw anybody's selection away.
+                const mem = st.target.kind === 'gate' ? null : st.target.id;
+                st.lastIds = Object.assign({}, st.lastIds, mem ? { [st.target.kind]: mem } : {});
+                st.target = { kind, id: kind === 'gate' ? null : ((st.lastIds || {})[kind] || null) };
+                saveTarget();
+                paint();
+            };
+        });
         wrap.querySelectorAll('[data-sort]').forEach((b) => {
             b.onclick = () => { st.sort = b.getAttribute('data-sort'); ovGoSec('servers'); };
+        });
+        wrap.querySelectorAll('th[data-sortcol]').forEach((b) => {
+            b.onclick = () => { st.sort = b.getAttribute('data-sortcol'); paint(); };
         });
         wrap.querySelectorAll('[data-cc]').forEach((b) => {
             b.onclick = () => {
@@ -1245,8 +1459,9 @@
         wrap.querySelectorAll('[data-detail]').forEach((b) => {
             b.onclick = (e) => { e.stopPropagation(); st.detailHost = b.getAttribute('data-detail'); ovGoSec('detail'); };
         });
-        wrap.querySelectorAll('.ov-srow[data-host]').forEach((b) => {
-            b.onclick = () => {
+        wrap.querySelectorAll('tr.ov-tr[data-host]').forEach((b) => {
+            const choose = () => {
+                if (b.classList.contains('is-locked')) return;
                 const h = b.getAttribute('data-host');
                 if (st.selecting) {
                     st.checked = has(st.checked, h) ? without(st.checked, h) : st.checked.concat([h]);
@@ -1255,6 +1470,10 @@
                 }
                 pick(h);
             };
+            b.onclick = choose;
+            // Double-click on a chosen server connects to it, the way a list works in Finder.
+            b.ondblclick = () => { if (!st.selecting && !b.classList.contains('is-locked') && !status().connected) connectTarget(); };
+            b.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); } };
         });
 
         const q = $('ov-q');
@@ -1267,22 +1486,14 @@
                 renderServers();
                 const sum = wrap.querySelector('.ov-summary');
                 const rows = visible();
-                if (sum && sum.firstElementChild) sum.firstElementChild.textContent =
-                    `${fa(rows.length)} از ${fa(st.scope === 'mine' ? st.mine.length : st.archive.length)} سرور · ${(SORTS.find(x => x.id === st.sort) || {}).label || ''}`;
+                if (sum && sum.firstElementChild) sum.firstElementChild.textContent = summaryText(rows);
                 // The rows are new DOM and carry no listeners of their own; without this a row
                 // found by searching cannot be clicked, which is the one thing a search is for.
                 ovWire();
             };
         }
         const qc = $('ov-q-clear');
-        if (qc) qc.onclick = () => { st.query = ''; paint(); };
-
-        wrap.querySelectorAll('[data-ov-front]').forEach((b) => {
-            b.onclick = () => {
-                const v = b.getAttribute('data-ov-front');
-                setFront(v === 'auto' || v === 'none' ? v : (parseInt(v, 10) || 'auto'));
-            };
-        });
+        if (qc) qc.onclick = (e) => { e.preventDefault(); st.query = ''; paint(); };
     }
 
     function act(k) {
@@ -1291,7 +1502,6 @@
             case 'refresh': doRefreshList(); break;
             case 'ping': startTest('ping'); break;
             case 'probe': startTest('probe'); break;
-            case 'probe-top': ovGoSec('servers'); startTest('probe'); break;
             case 'stop': stopTest(); break;
             case 'select': st.selecting = !st.selecting; st.checked = []; paint(); break;
             case 'clear-countries': st.countries = []; paint(); break;
@@ -1301,6 +1511,7 @@
             case 'remove-checked': confirmRemove(st.checked); break;
             case 'remove-dead': confirmRemove(deadOf(visible())); break;
             case 'restore': curate('restore', []); break;
+            case 'add-account': ovGoSec('accounts'); if (window.OvProfiles) OvProfiles.openAccountSheet(); break;
             case 'detail-select': pick(st.detailHost); ovGoSec('servers'); break;
             case 'detail-keep': curate(has(st.kept, st.detailHost) ? 'drop' : 'keep', [st.detailHost]); break;
             case 'detail-remove': confirmRemove([st.detailHost]); break;
@@ -1308,20 +1519,44 @@
         }
     }
 
+    const PROFILE_SECS = { tunnelbear: 'ov-tunnelbear', profiles: 'ov-profiles', accounts: 'ov-accounts' };
+
     function paint() {
         if (!$('ov-wrap')) return;
         renderIdent();
+        renderSideCounts();
         renderBar();
+        renderBarAction();
         renderSnack();
-        if (ovSec === 'connect') { renderHero(); renderCards(); }
+        if (ovSec === 'connect') { renderHero(); renderDest(); renderCards(); }
         if (ovSec === 'servers') { renderTools(); renderServers(); }
         if (ovSec === 'countries') renderCountries();
         if (ovSec === 'sort') renderSorts();
         if (ovSec === 'detail') renderDetail();
         if (ovSec === 'guide') renderGuide();
+        if (PROFILE_SECS[ovSec] && window.OvProfiles) {
+            OvProfiles.render(ovSec, $(PROFILE_SECS[ovSec]), bridge, { profileId: status().profileId || null, connected: !!status().connected });
+        }
         if (ovSec === 'log') renderLog();
         ovWire();
     }
+
+    /** What openvpn-profiles.js may ask of this window. */
+    const bridge = {
+        say,
+        go: (id) => ovGoSec(id),
+        sheetHost: () => $('ov-sheet-host'),
+        target: () => st.target,
+        choose: (kind, id) => choose(kind, id),
+        connectChosen: () => { if (!status().connected) connectTarget(); },
+        connectFastest: () => doConnectProfile('fastest'),
+        busy: () => st.busy || !!status().connecting,
+        // The profiles arrived: the home page reads them («مقصد اتصال», the card), so it redraws.
+        loaded: () => { if (ovSec === 'connect') paint(); else bridge.changed(); },
+        // A profile page changed something the frame shows (a count, an account): redraw the frame
+        // parts only — never the page it came from, which is under the user's fingers.
+        changed: () => { renderSideCounts(); renderBar(); renderBarAction(); renderIdent(); },
+    };
 
     // ── talking to the server ──────────────────────────────────────────────
 
@@ -1350,14 +1585,23 @@
         st.hidden = d.hidden || [];
         st.pings = d.pings || {};
         st.probes = d.probes || {};
-        st.front = d.front || 'auto';
-        st.fronts = d.fronts || [];
         st.suggested = d.suggested || null;
 
         // The server's remembered choice wins; ours is only a fallback for a first-ever open, and
         // «the first row» is never the answer — that list is sorted by megabits measured in Japan.
         if (d.selected) st.selected = d.selected;
         else if (!st.selected && d.suggested) { st.selected = d.suggested; pick(d.suggested, true); }
+
+        // Whatever is carrying traffic IS the destination — including a «سریع‌ترین» the server
+        // picked. Otherwise the page would show one server connected and another chosen.
+        const s = d.status || {};
+        if (s.connected || s.connecting) {
+            if (s.profileId) {
+                const p = prof().profiles.find((x) => x.id === s.profileId);
+                const kind = p ? (p.tunnelbear ? 'bear' : 'own') : st.target.kind;
+                if (st.target.id !== s.profileId || st.target.kind !== kind) { st.target = { kind, id: s.profileId }; saveTarget(); }
+            } else if (s.host && st.target.kind !== 'gate') { st.target = { kind: 'gate', id: null }; saveTarget(); }
+        }
 
         paint();
     }
@@ -1371,11 +1615,13 @@
 
     async function pick(host, quiet) {
         if (!host) return;
-        const was = (st.payload && st.payload.status) || {};
+        const was = status();
         st.selected = host;
+        if (st.target.kind !== 'gate') { st.target = { kind: 'gate', id: null }; saveTarget(); }
         // A relay chosen out of the archive has to be kept as well, or the next refresh drops it
         // and the connect button holds a selection it cannot find.
         const inMine = st.mine.some(r => r.host === host);
+        paint();
         try {
             await post('/api/openvpn/select', { host });
             if (!inMine) { await post('/api/openvpn/curate', { action: 'keep', hosts: [host] }); }
@@ -1389,8 +1635,20 @@
         await refresh();
     }
 
+    /**
+     * A TunnelBear country or one of the user's own profiles was chosen on its page. Same rule as
+     * a relay: while connected elsewhere, choosing MOVES the tunnel.
+     */
+    async function choose(kind, id) {
+        const was = status();
+        st.target = { kind, id };
+        saveTarget();
+        paint();
+        if (was.connected && !isLive(kind, id) && targetInfo().ok) { await connectTarget(); }
+    }
+
     async function toggle() {
-        const s = (st.payload && st.payload.status) || {};
+        const s = status();
         if (s.connected || s.connecting) {
             st.busy = true; paint();
             try { await post('/api/openvpn/disconnect'); log('— قطع شد'); }
@@ -1399,18 +1657,34 @@
             await refresh();
             return;
         }
-        await doConnect(st.selected);
+        await connectTarget();
+    }
+
+    /** Connect to whatever «مقصد اتصال» says, from whichever source it is. */
+    async function connectTarget() {
+        const t = targetInfo();
+        if (!t.ok) { if (t.why) say(t.why); return; }
+        if (t.kind === 'gate') return doConnect(t.id);
+        return doConnectProfile(t.id);
     }
 
     async function doConnect(host) {
         if (!host) return;
         st.busy = true; st.log = []; paint();
-        if (st.front === 'auto' && !(st.fronts || []).length) {
-            log('هیچ فرانتی روشن نیست — اول سایفون بالا می‌آید، بعد OpenVPN از داخلش وصل می‌شود.');
-        }
-        try { await post('/api/openvpn/connect', { host, via: st.front }); }
+        try { await post('/api/openvpn/connect', { host }); }
         catch (e) { log('✗ ' + e.message); say(e.message); }
         st.busy = false;
+        await refresh();
+    }
+
+    async function doConnectProfile(id) {
+        st.busy = true; st.log = []; paint();
+        try {
+            const r = await post('/api/openvpn/profiles/connect', { id });
+            say('در حال اتصال به ' + ((r.place && r.place.name) || r.profile || ''));
+        } catch (e) { log('✗ ' + e.message); say(e.message); }
+        st.busy = false;
+        if (window.OvProfiles) OvProfiles.refresh();
         await refresh();
     }
 
@@ -1444,14 +1718,6 @@
 
     async function stopTest() {
         try { await post('/api/openvpn/test/cancel'); } catch (e) { /* it may have just ended */ }
-        await refresh();
-    }
-
-    async function setFront(front) {
-        try {
-            const out = await post('/api/openvpn/front', { front });
-            st.front = out.front;
-        } catch (e) { say(e.message); }
         await refresh();
     }
 
@@ -1511,6 +1777,8 @@
      * re-rendering the list under a user who is scrolling it is its own bug.
      */
     window.handleOpenVpnEvent = function (s) {
+        // A delay result for one of the user's own / TunnelBear profiles: that section only.
+        if (s && s.profileProbe) { if (window.OvProfiles) window.OvProfiles.onEvent(s); return; }
         if (!s || !st.payload) return;
         // `broadcast('openvpn', …)` carries a full status from a sweep and a bare {phase, host}
         // from connect/disconnect. Only the first can be applied in place; assuming it for the
@@ -1518,10 +1786,11 @@
         if (s.installed === undefined && s.sweep === undefined) { refresh(); return; }
         const hadSweep = !!(st.payload.status && st.payload.status.sweep);
         st.payload.status = s;
-        if (s.frontMode !== undefined) st.front = s.frontMode;
         if (!$('ov-wrap')) return;
+        renderIdent();
         renderBar();
-        if (ovSec === 'connect') { renderHero(); renderCards(); }
+        renderBarAction();
+        if (ovSec === 'connect') { renderHero(); renderDest(); renderCards(); }
         // A sweep that has just ended means new results, which the list must be redrawn from.
         if (ovSec === 'servers') { renderTools(); if (hadSweep && !s.sweep) { refresh(); } else { renderServers(); } ovWire(); }
         else if (hadSweep && !s.sweep) refresh();
@@ -1533,8 +1802,8 @@
     window.MVProbe.openvpnInfo = () => {
         const s = (st.payload && st.payload.status) || {};
         return {
-            host: s.host ? shortName(s.host) : null,
-            via: s.via || null,
+            host: s.profileId ? (s.label || null) : (s.host ? shortName(s.host) : null),
+            via: s.connected ? (s.path === 'split' ? 'مستقیم، رلهٔ محلی' : 'مستقیم') : null,
             localIp: s.localIp || null,
         };
     };
@@ -1567,7 +1836,16 @@
         $('ov-wrap').querySelectorAll('.mv-side-item[data-ov-sec]').forEach((b) => {
             b.onclick = () => ovGoSec(b.getAttribute('data-ov-sec'));
         });
+        // This window's engine is openvpn.exe, its own item in the store — the same door the
+        // gateway and the warp engines put in their sidebars.
+        const storeBtn = $('ov-wrap').querySelector('[data-ov-store]');
+        if (storeBtn) storeBtn.onclick = () => {
+            if (typeof window.storeOpenItem === 'function') window.storeOpenItem('core|openvpn');
+            else if (window.MV && MV.wm) MV.wm.open('store');
+        };
         $('ov-back').onclick = goBack;
+        // The TunnelBear / profile data is needed on the home page too («مقصد اتصال», the card).
+        if (window.OvProfiles) OvProfiles.attach(bridge);
         ovGoSec('connect');
         refresh();
         setInterval(() => {

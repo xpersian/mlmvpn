@@ -22,7 +22,27 @@
   var DRAG_OUT = 6;
 
   // ── The order, and who is where ────────────────────────────────────────
+  // Once per layout (1.2.5): usage and the tutorials go into «ابزارها» when it still exists and
+  // they are on the desk. After that the user's own arrangement is the only rule.
+  function migrateToolsOnce() {
+    try {
+      if (!window.PersistentStorage || PersistentStorage.getItem('mv-tools-v2')) return;
+      var raw = PersistentStorage.getItem('mv-folders');
+      if (raw) {
+        var f = JSON.parse(raw);
+        var taken = {};
+        Object.keys(f || {}).forEach(function (k) { ((f[k] && f[k].apps) || []).forEach(function (id) { taken[id] = true; }); });
+        if (f && f.tools && Array.isArray(f.tools.apps)) {
+          ['monitor', 'guide'].forEach(function (id) { if (!taken[id]) f.tools.apps.push(id); });
+          MV.store('mv-folders', JSON.stringify(f));
+        }
+      }
+      MV.store('mv-tools-v2', '1');
+    } catch (e) { /* the layout as it was */ }
+  }
+
   function readOrder() {
+    migrateToolsOnce();
     var folders = MV.apps.folders();
     var inFolder = {};
     Object.keys(folders).forEach(function (k) { folders[k].apps.forEach(function (id) { inFolder[id] = k; }); });

@@ -1,4 +1,9 @@
 
+// The Worker route wraps dns.lookup, so it goes in before anything opens a socket: from here on
+// every *.workers.dev call — axios, fetch, gtFetch — gets checked, healthy-only addresses
+// (worker-route.js; the filtering of 2026-09-28 left some Cloudflare IPs completing TLS and then
+// never answering).
+require('./worker-route').install();
 const axios = require('axios');
 const { HttpProxyAgent } = require('http-proxy-agent');
 // server.js — سرور اصلی MLM VPN
@@ -126,6 +131,25 @@ function broadcast(type, data) {
     wss.clients.forEach(c => { if (c.readyState === 1) c.send(msg); });
 }
 
+// The self-healing layer speaks in the log the user can open (core_log), in words: which IP of a
+// Worker went silent and where it moved, and the family verdict for this network.
+require('./worker-route').onReport((text) => { try { broadcast('core_log', '[WorkerRoute] ' + text); } catch (e) {} });
+require('./cf-family').onVerdict((text) => { try { broadcast('core_log', text); } catch (e) {} });
+
+/** What the self-healing layer knows right now — for the log screen and for bug reports. */
+app.get('/api/cf-health', (req, res) => {
+    const fam = require('./cf-family');
+    const wr = require('./worker-route');
+    const host = String(req.query.host || '');
+    res.json({
+        verdict: fam.current(),
+        ipv6Route: fam.hasIpv6RouteNow(),
+        network: fam.networkKey(),
+        scout: require('./scan-scout').lastReport,
+        workerRoute: { report: host ? wr.report(host) : wr.latestReport(), ips: wr.snapshot() },
+    });
+});
+
 // ── Live speed and usage, from every engine (traffic-feed.js) ─────────────────────────
 // Until 1.2.2 only Xray and SNI were ever counted, so the GitHub tunnel, the full-system
 // tunnel to a WARP engine and the Google Script tunnel showed zero speed and zero usage.
@@ -139,12 +163,13 @@ trafficFeed.setEmitter((payload) => broadcast('traffic_update', payload));
 // tunnel's bytes only when Xray is the engine behind it — under ماسک / وایرگارد / وارپ در وارپ
 // the Xray standing by for the system proxy is idle, and letting it outrank the tunnel is what
 // left those three reading zero speed and zero usage.
+// gt-dataplane follows whichever GitHub Tunnel engine is up (v1 Tailscale or v2 Xray).
 const gtCarriesAll = () => {
-    try { const s = require('./github-tunnel/gt-engine').getStatus(); return !!(s.connected && s.mode === 'tun'); } catch (e) { return false; }
+    try { const s = require('./github-tunnel/gt-dataplane').getStatus(); return !!(s.connected && s.mode === 'tun'); } catch (e) { return false; }
 };
 trafficFeed.registerCounter('github-tunnel', {
-    active: () => { try { return require('./github-tunnel/gt-engine').getStatus().connected; } catch (e) { return false; } },
-    read: () => require('./github-tunnel/gt-engine').readTrafficCounters(),
+    active: () => { try { return require('./github-tunnel/gt-dataplane').getStatus().connected; } catch (e) { return false; } },
+    read: () => require('./github-tunnel/gt-dataplane').readTrafficCounters(),
     covers: () => gtCarriesAll(),
 });
 trafficFeed.registerCounter('tun', { active: () => !!tun.isRunning(), read: () => tun.readTrafficCounters(), covers: () => false });
@@ -437,6 +462,9 @@ app.post('/api/cloudflare/usage', async (req, res) => {
             }
         }
         res.json({ success: true, requests });
+        // Cloudflare's own verdict on every invocation, into the log (cf-errors.js) — the evidence
+        // a «nothing connects» report needs. After the answer, throttled, never in the way.
+        require('./cf-errors').logFor(headers, accountId, (m) => { console.log(m); try { broadcast('core_log', m); } catch (e) {} });
     } catch (e) {
         res.json({ success: false, message: e.response?.data?.errors?.[0]?.message || e.message });
     }
@@ -511,6 +539,7 @@ app.post('/api/scan', async (req, res) => {
     let combos = [];
     let totalCombos = 0;
     let ipsCount = 0;
+    let pendingScout = null;
 
     if (resume && scanState && scanState.combos && scanState.combos.length > 0) {
         totalCombos = scanState.combos.length;
@@ -544,7 +573,21 @@ app.post('/api/scan', async (req, res) => {
         }
 
         let safeMax = Math.min(maxIps, 50000000);
-        const sampled = sampleFromRanges(ranges, Math.max(0, safeMax - customIps.length));
+        const budget = Math.max(0, safeMax - customIps.length);
+
+        // THE SCOUT (scan-scout.js). Cloudflare's ranges are no longer sampled blind: every range
+        // is sampled with the base config's own first request, Cloudflare's IPv6 prefixes too, and
+        // the families are settled with the real Xray test — the filtering of 2026-09-28 left CF
+        // IPv4 passing TLS and carrying nothing while IPv6 worked, and a blind walk spent the whole
+        // test budget on silent ranges. Only with a TLS base config it can judge; other providers
+        // keep the plain sampling and share the budget.
+        const cfRanges = ranges.filter((r) => r.provider === 'cloudflare' && !String(r.cidr).includes(':'));
+        const scoutTarget = baseConfig ? require('./scan-scout').target(baseConfig) : null;
+        const useScout = cfRanges.length > 0 && !!scoutTarget && scoutTarget.tls && !!scoutTarget.sni && budget > 0;
+        const plainRanges = useScout ? ranges.filter((r) => !cfRanges.includes(r)) : ranges;
+        const plainShare = useScout ? (plainRanges.length ? Math.floor(budget / 2) : 0) : budget;
+        const sampled = sampleFromRanges(plainRanges, plainShare);
+        if (useScout) pendingScout = { cfRanges: cfRanges.map((r) => r.cidr), count: budget - plainShare, customIps, sampled };
         const targetsByIp = new Map();
         for (const target of [...customIps, ...sampled]) {
             if (!target || !target.ip) continue;
@@ -552,15 +595,17 @@ app.post('/api/scan', async (req, res) => {
         }
         const targets = Array.from(targetsByIp.values()).slice(0, maxIps);
 
-        if (!targets.length) return res.status(400).json({ error: 'هیچ IP ای پیدا نشد' });
-        ipsCount = targets.length;
+        if (!targets.length && !useScout) return res.status(400).json({ error: 'هیچ IP ای پیدا نشد' });
+        ipsCount = useScout ? Math.min(maxIps, budget + customIps.length) : targets.length;
 
         for (const target of targets) {
             for (const p of ports) {
                 combos.push({ ip: target.ip, port: p, provider: target.provider || 'generic' });
             }
         }
-        totalCombos = combos.length;
+        // With the scout, the real list exists only after it has run; this is the estimate the
+        // panel shows until the 'started' event carries the real total.
+        totalCombos = useScout ? ipsCount * ports.length : combos.length;
 
         // If resuming but scanState was empty (e.g. app restarted), we must slice the newly generated combos
         if (resume && resumeTestedCount > 0 && resumeTestedCount < totalCombos) {
@@ -584,7 +629,64 @@ app.post('/api/scan', async (req, res) => {
     };
     res.json({ message: resume ? 'اسکن ادامه یافت' : 'اسکن شروع شد', total: totalCombos, ips: ipsCount, ports: ports.length });
 
-    broadcast('started', { total: totalCombos });
+    if (pendingScout) {
+        const slog = (message) => { try { broadcast('system_log', { message }); } catch (e) {} console.log('[ScanScout] ' + message); };
+        let scouted = null;
+        // The scan binds to the PHYSICAL adapter on purpose — it measures the real line, not the exit
+        // of a VPN that happens to be on. When a VPN has taken the default route away from that
+        // adapter (the SoftEther «گیت‌وی» does: measured on the dev machine, Wi-Fi keeps only /32
+        // host routes), every IPv4 probe fails instantly with ENETUNREACH and the scan reads as
+        // «nothing clean». Said once, in words, before the scout runs.
+        try {
+            const lv4 = require('./scanner').getPhysicalIpCached();
+            const first = String((pendingScout.cfRanges || [])[0] || '104.16.0.0/13').split('/')[0].split('.').map(Number);
+            const probeIp = first.length === 4 ? `${first[0]}.${first[1]}.${first[2]}.${(first[3] || 0) + 1}` : '104.16.0.1';
+            if (lv4) {
+                const noRoute = await new Promise((r) => {
+                    const s = require('net').connect({ host: probeIp, port: 443, localAddress: lv4 });
+                    const fin = (v) => { try { s.destroy(); } catch (e) { /* gone */ } r(v); };
+                    s.setTimeout(3000, () => fin(false));
+                    s.once('connect', () => fin(false));
+                    s.once('error', (e) => fin(e && (e.code === 'ENETUNREACH' || e.code === 'EHOSTUNREACH')));
+                });
+                if (noRoute) slog('کارت شبکهٔ اصلی این کامپیوتر مسیر اینترنت IPv4 ندارد — یک VPN (مثل «گیت‌وی MLM») مسیر پیش‌فرض را گرفته است. اسکنر خط واقعی شما را می‌سنجد، نه خروجی آن VPN را؛ برای اسکن IPv4 آن را موقتاً قطع کنید. IPv6، اگر مسیر خودش را دارد، اسکن می‌شود.');
+            }
+        } catch (e) { /* only a hint */ }
+        try {
+            scouted = await require('./scan-scout').order({
+                ranges: pendingScout.cfRanges, baseConfig, port: ports[0] || 443, count: pendingScout.count,
+                localV4: require('./scanner').getPhysicalIpCached(), log: slog,
+                shouldStop: () => scanState.id !== myScanId || scanState.stopRequested,
+            });
+        } catch (e) { slog('پیشاهنگ خطا داد؛ نمونه‌گیری ساده: ' + e.message); }
+        if (scanState.id !== myScanId || scanState.stopRequested) return;
+        const cfIps = scouted ? scouted.ips
+            : sampleFromRanges(pendingScout.cfRanges.map((cidr) => ({ cidr, provider: 'cloudflare' })), pendingScout.count).map((x) => x.ip);
+        if (scouted) {
+            const v = scouted.verdict || {};
+            const say = (b) => (b === true ? 'داده رد می‌کند' : b === false ? 'داده رد نمی‌کند' : 'نامعلوم');
+            slog(`پیشاهنگ: IPv4 ${say(v.v4)}، IPv6 ${say(v.v6)} — ${cfIps.length} آی‌پی کلادفلر به ترتیب بهترین.`);
+        }
+        const seen = new Set();
+        const all = [];
+        for (const t of [...pendingScout.customIps, ...cfIps.map((ip) => ({ ip, provider: 'cloudflare' })), ...pendingScout.sampled]) {
+            if (!t || !t.ip || seen.has(t.ip)) continue;
+            seen.add(t.ip);
+            all.push(t);
+        }
+        combos = [];
+        for (const t of all.slice(0, maxIps)) for (const p of ports) combos.push({ ip: t.ip, port: p, provider: t.provider || 'generic' });
+        if (!combos.length) {
+            scanState.running = false;
+            broadcast('finished', { total: 0, alive: 0, dead: 0 });
+            return;
+        }
+        scanState.combos = combos;
+        scanState.total = combos.length;
+        scanState.ipsCount = Math.min(all.length, maxIps);
+    }
+
+    broadcast('started', { total: scanState.total });
 
 
     currentScanConcurrencyObj.value = parseInt(concurrency) || 50;
@@ -639,7 +741,30 @@ app.post('/api/scan', async (req, res) => {
         broadcast('system_log', { message: `Stage 2: Found ${aliveResults.length} IPs with valid tcp latency.` });
 
         const limitCount = parseInt(finalTestCount) || 50;
-        const topN = aliveResults.slice(0, limitCount);
+        let topN = aliveResults.slice(0, limitCount);
+
+        // «ALIVE» BEFORE THE REAL TEST (scan-scout.js › alive). An open port proves nothing since
+        // 2026-09-28: most Cloudflare addresses complete TCP (and TLS) and then never answer the
+        // config's own request, and each of them cost up to ten seconds of real test. TLS with the
+        // config's name plus its first request — under a second on a good address — is asked of
+        // the candidates first, in latency order, until the budget is full.
+        const scout = require('./scan-scout');
+        const aliveTarget = scout.target(scanState.baseConfig);
+        if (aliveTarget && aliveTarget.tls && aliveTarget.sni && aliveResults.length) {
+            broadcast('stage2_start', { message: 'بررسی سریع «زنده بودن» با درخواست خود کانفیگ…' });
+            const localV4 = require('./scanner').getPhysicalIpCached();
+            const passed = [];
+            const cap = Math.min(aliveResults.length, limitCount * 8);
+            for (let i = 0; i < cap && passed.length < limitCount && !scanState.stopRequested; i += 64) {
+                const chunk = aliveResults.slice(i, Math.min(i + 64, cap));
+                const ok = await scout.pool(chunk, 32, (r) => scout.alive(r.ip, r.port, aliveTarget, { localV4 }));
+                chunk.forEach((r, k) => { if (ok[k] && passed.length < limitCount) passed.push(r); });
+            }
+            broadcast('system_log', { message: `Stage 2: alive — ${passed.length} آی‌پی درخواست خود کانفیگ را جواب دادند.` });
+            // Nothing passed: the check may not suit this config — the real test still gets a
+            // small share rather than the scan ending on a guess.
+            topN = passed.length ? passed : aliveResults.slice(0, Math.min(10, limitCount));
+        }
 
         if (topN.length === 0) {
             broadcast('system_log', { message: `Stage 2: topN is empty! Aborting Stage 3.` });
@@ -766,8 +891,21 @@ app.post('/api/scan', async (req, res) => {
  * content check, which only runs for the handful of scripts that pass the cheap filter.
  *
  * Worker names are randomised at deploy time, so name matching is impossible by design.
+ * The account's panel registry (panel-registry.js) is asked first: it names the Zeus this account
+ * uses, the one the other machine may have installed.
  */
-async function findExistingZeusDeployment(headers, accountId) {
+async function findExistingZeusDeployment(headers, accountId, regAcc) {
+    const registry = require('./panel-registry');
+    try {
+        const g = await registry.get(regAcc, 'ZEU');
+        if (g && g.script && await registry.scriptExists(regAcc, g.script)) {
+            let dbUuid = g.d1 || '';
+            if (!dbUuid) { try { dbUuid = registry.d1Of(await registry.bindings(regAcc, g.script), 'DB') || ''; } catch (e) { /* unknown: the database lookup follows */ } }
+            console.log(`[ZEUS] Existing deployment (registry): worker=${g.script} d1=${dbUuid || 'unknown'}`);
+            return { scriptName: g.script, dbUuid };
+        }
+    } catch (e) { /* the scan below */ }
+
     let scripts = [];
     try {
         const listRes = await axios.get(
@@ -779,6 +917,8 @@ async function findExistingZeusDeployment(headers, accountId) {
         console.error('[ZEUS] Could not list workers:', e.response?.data || e.message);
         return null;
     }
+    // Newest first: where an older app made a Zeus per press, the one worked on last is in use.
+    scripts.sort((a, b) => String(b?.modified_on || '').localeCompare(String(a?.modified_on || '')));
 
     for (const script of scripts) {
         const name = script?.id;
@@ -794,14 +934,12 @@ async function findExistingZeusDeployment(headers, accountId) {
         } catch (e) { continue; }
         if (!dbBinding) continue;
 
-        // Confirm it is really Zeus before we overwrite it.
+        // Confirm it is really Zeus before we overwrite it. The plain /content endpoint answers 405
+        // for module Workers (2026-09-30: every Zeus on the account went unseen and each press made
+        // another), so the main module is read through /content/v2 (store/workers.js).
         try {
-            const contentRes = await axios.get(
-                `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${name}/content`,
-                { headers, timeout: 30000, transformResponse: [(d) => d] }
-            );
-            const body = typeof contentRes.data === 'string' ? contentRes.data : '';
-            if (!body.includes('PANEL_ZEUS')) continue;
+            const part = await require('./store/workers').fetchScript(regAcc, accountId, name);
+            if (!part || !String(part.body || '').includes('PANEL_ZEUS')) continue;
         } catch (e) {
             console.error(`[ZEUS] Could not read content of ${name}:`, e.message);
             continue;
@@ -891,11 +1029,42 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
 
         // 3. Generate Secrets
         const crypto = require('crypto');
-        const workerUuid = crypto.randomUUID();
-        const trPass = crypto.randomUUID().replace(/-/g, '');
-        const subPath = crypto.randomUUID().substring(0, 8);
+        let workerUuid = crypto.randomUUID();
+        let trPass = crypto.randomUUID().replace(/-/g, '');
+        let subPath = crypto.randomUUID().substring(0, 8);
 
-        const scriptName = generateSafeWorkerName();
+        let scriptName = generateSafeWorkerName();
+
+        // ONE BPB per account, shared with the phone (panel-registry.js). It used to be a brand-new
+        // Worker on every press — six BPB Workers on one account (2026-09-30). In order: the
+        // account's registry, the one this account record already points at (existingUrl), the
+        // newest BPB already on the account (adopted: its own UUID, password and path, read from
+        // the settings compiled into it). Only when there is none is a new one made.
+        const registry = require('./panel-registry');
+        const regAcc = { email: _email, token: _token, _accountId: accountId };
+        let bpbReuse = null;
+        if (panelType !== 'ZEUS') {
+            try {
+                const g = await registry.get(regAcc, 'BPB');
+                if (g && g.s && g.s.uuid && await registry.scriptExists(regAcc, g.script)) {
+                    bpbReuse = { script: g.script, uuid: g.s.uuid, trPass: g.s.trPass, subPath: g.s.subPath, kv: g.kv, from: 'registry' };
+                }
+                if (!bpbReuse) {
+                    const found = await registry.find(regAcc, 'BPB', { prefer: registry.scriptOf(req.body.existingUrl), force: true });
+                    if (found.length) {
+                        const a = await registry.adopt(regAcc, 'BPB', found[0].script);
+                        bpbReuse = { script: a.rec.script, uuid: a.rec.uuid, trPass: a.rec.trPass, subPath: a.rec.subPath, kv: a.rec.kvId, from: 'adopted' };
+                    }
+                }
+            } catch (e) { console.log('[BPB] ثبت پنل‌ها: ' + e.message + ' — نصب تازه'); }
+            if (bpbReuse) {
+                scriptName = bpbReuse.script;
+                workerUuid = bpbReuse.uuid;
+                trPass = bpbReuse.trPass || trPass;
+                subPath = bpbReuse.subPath || subPath;
+                console.log(`[BPB] همان BPB این حساب به کار می‌رود (${bpbReuse.from}): ${scriptName}`);
+            }
+        }
 
         if (panelType === 'ZEUS') {
             console.log('[ZEUS] Deploying Zeus Panel...');
@@ -908,11 +1077,12 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
             // overwrite that script and keep its database. The lookup deliberately ignores
             // anything stored locally, so deleting the account inside the app and adding
             // it again still lands on the same panel.
-            const existingZeus = await findExistingZeusDeployment(headers, accountId);
+            const existingZeus = await findExistingZeusDeployment(headers, accountId, regAcc);
             const zeusScriptName = existingZeus?.scriptName || scriptName;
             const isZeusUpdate = !!existingZeus;
 
             let dbUuid = existingZeus?.dbUuid || '';
+            let dbCreated = false;
             // The worker may be gone while its database survived (or the binding did not
             // report an id) — reuse that before making a new one, or the users vanish.
             if (!dbUuid) dbUuid = await findExistingZeusDatabase(headers, accountId);
@@ -921,7 +1091,7 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
                 const dbName = `zeus-db-${crypto.randomUUID().substring(0, 8)}`;
                 try {
                     const dbRes = await axios.post(`https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database`, { name: dbName }, { headers });
-                    if (dbRes.data.success) dbUuid = dbRes.data.result.uuid;
+                    if (dbRes.data.success) { dbUuid = dbRes.data.result.uuid; dbCreated = true; }
                 } catch (e) {
                     console.error('[ZEUS] D1 Creation Error:', e.response?.data || e.message);
                     if (e.response?.data?.errors?.[0]?.message?.toLowerCase().includes('terms of service')) {
@@ -933,8 +1103,49 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
             if (!dbUuid) throw new Error('Failed to create D1 database for Zeus.');
             console.log(`[ZEUS] ${isZeusUpdate ? 'Updating' : 'Creating'} panel — worker=${zeusScriptName}, d1=${dbUuid}`);
 
+            // The panel's password — never the fixed default. Zeus's session cookie is sha256(password)
+            // and every config it hands out names the worker's host, so «Admin123!» let anyone holding
+            // one config into the panel; and a panel with NO password stored answers every API call
+            // (verifyApiAuth) and hands its first-run setup to whoever calls it first. So the hash is
+            // written straight into the panel's database, over the API, before the code goes up: the
+            // password the account already holds for this panel is kept (registry, then this
+            // account record), the old default or none is replaced by a random one, and a password
+            // the user set inside the panel is theirs and left alone.
+            const zeusSha = (p) => crypto.createHash('sha256').update(String(p)).digest('hex');
+            let zeusKnown = null;
+            try {
+                const g = await registry.get(regAcc, 'ZEU');
+                if (g && g.script === zeusScriptName && g.s && g.s.password) zeusKnown = g.s.password;
+            } catch (e) { /* the account record may know it */ }
+            if (!zeusKnown && req.body.zeusPassword) zeusKnown = String(req.body.zeusPassword);
+            let zeusPassword = null;
+            let zeusPwStored = false;
+            try {
+                await registry.d1Query(regAcc, dbUuid, 'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+                const row = (await registry.d1Query(regAcc, dbUuid, "SELECT value FROM settings WHERE key = 'panel_password'"))[0];
+                const cur = row && row.value ? String(row.value) : null;
+                if (cur && zeusKnown && cur === zeusSha(zeusKnown)) {
+                    zeusPassword = zeusKnown;
+                    zeusPwStored = true;
+                } else if (!cur || cur === zeusSha('Admin123!')) {
+                    const next = crypto.randomBytes(12).toString('base64url');
+                    await registry.d1Query(regAcc, dbUuid, "INSERT OR REPLACE INTO settings (key, value) VALUES ('panel_password', ?)", [zeusSha(next)]);
+                    zeusPassword = next;
+                    zeusPwStored = true;
+                    console.log(`[ZEUS] رمز اختصاصی پنل در دیتابیسش نوشته شد${cur ? ' (به جای رمز پیش‌فرض)' : ''}`);
+                } else console.log('[ZEUS] پنل رمزی دارد که کاربر خودش گذاشته — دست نخورد');
+            } catch (e) { console.log('[ZEUS] رمز در دیتابیس پنل نوشته نشد: ' + e.message); }
+            // Could not reach the database: a database made just now is empty, so the panel's own
+            // first-run setup (below) takes a random one; otherwise what the account knows, or the old default.
+            if (!zeusPwStored) zeusPassword = zeusKnown || (dbCreated ? crypto.randomBytes(12).toString('base64url') : null);
+
             // 2. Upload Zeus Worker
-            const workerScript = fs.readFileSync(path.join(__dirname, 'public', 'zeus.js'), 'utf8');
+            // The developer's newest Zeus (store/worker-live.js), checked to really be Zeus; the copy
+            // this build ships only when GitHub cannot be reached and nothing good is cached.
+            const zeusCode = await require('./store/worker-live').codeToDeploy('zeus',
+                () => fs.readFileSync(path.join(__dirname, 'public', 'zeus.js'), 'utf8'), { log: (m) => console.log(m) });
+            const workerScript = zeusCode.code;
+            console.log(`[ZEUS] code: ${zeusCode.from}${zeusCode.version ? ' ' + zeusCode.version : ''}`);
             // Zeus 1.11+ reads three OPTIONAL variables beyond the D1 binding. Without
             // them the panel still runs, but "update panel" and the request-usage figures
             // are dead: `getUsage` returns zeros unless CF_API_TOKEN and CF_ACCOUNT_ID are
@@ -970,11 +1181,10 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
             await axios.post(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${zeusScriptName}/subdomain`, { enabled: true }, { headers });
             console.log('[ZEUS] Subdomain Enabled');
 
-            // 4. Set Initial Admin Password via API
+            // 4. The password is already in the panel's database (above). Only when that could not
+            // be written does the panel's own first-run setup run, a few seconds after it is live.
             const workerUrl = `https://${zeusScriptName}.${subdomain}.workers.dev`;
-
-            // Background initialization
-            setTimeout(async () => {
+            if (!zeusPwStored) setTimeout(async () => {
                 try {
                     // Through gtFetch: this is the worker's own workers.dev host, which is
                     // filtered in Iran. Deploying succeeded (that is api.cloudflare.com),
@@ -983,7 +1193,7 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
                     const r = await gtFetch(`${workerUrl}/api/setup-password`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ password: 'Admin123!' }),
+                        body: JSON.stringify({ password: zeusPassword || 'Admin123!' }),
                         timeoutMs: 20000
                     });
                     console.log(`[ZEUS] Initial password set (status ${r.status}${r.viaFallback ? ', via fallback' : ''})`);
@@ -992,7 +1202,11 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
                 }
             }, 5000); // wait 5 seconds for worker to be live
 
-            return res.json({ success: true, url: workerUrl, workerName: zeusScriptName, panelType: 'ZEUS', reused: isZeusUpdate });
+            try {
+                await registry.put(regAcc, 'ZEU', { script: zeusScriptName, url: workerUrl, kv: null, d1: dbUuid || null, s: zeusPassword ? { password: zeusPassword } : {} });
+                registry.forgetSurvey(regAcc);
+            } catch (e) { console.log('[ZEUS] ثبت در حساب نشد: ' + e.message); }
+            return res.json({ success: true, url: workerUrl, workerName: zeusScriptName, panelType: 'ZEUS', reused: isZeusUpdate, zeusPassword: zeusPassword || undefined });
 
         } else {
             // 4. KV Namespace (BPB Logic)
@@ -1024,7 +1238,7 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
                 }
             };
 
-            let namespace = await findKvNamespace();
+            let namespace = bpbReuse && bpbReuse.kv ? { id: bpbReuse.kv } : await findKvNamespace();
             if (!namespace) {
                 try {
                     const kvRes = await axios.post(
@@ -1062,7 +1276,10 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
                 fallback: '',
                 dohUrl: 'https://cloudflare-dns.com/dns-query'
             };
-            const workerTemplate = fs.readFileSync(path.join(__dirname, 'public', 'worker.js'), 'utf8');
+            // The developer's newest BPB release (store/worker-live.js), else the bundled copy.
+            const bpbCode = await require('./store/worker-live').codeToDeploy('bpb',
+                () => fs.readFileSync(path.join(__dirname, 'public', 'worker.js'), 'utf8'), { log: (m) => console.log(m) });
+            const workerTemplate = bpbCode.code;
             const workerScript = `Object.assign(globalThis, ${JSON.stringify({ EMBEDED_SETTINGS: embeddedSettings })});\n${workerTemplate}`;
             // Mirror what the panel uses when it redeploys ITSELF (src/api/workers.ts):
             // today's date + nodejs_compat + keep_bindings. The panel rewrites its own
@@ -1101,13 +1318,36 @@ app.post('/api/cloudflare/deploy', async (req, res) => {
             await axios.put(`https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/pwd`, "Admin123!", { headers: { ...headers, 'Content-Type': 'text/plain' } });
 
             const workerUrl = `https://${scriptName}.${subdomain}.workers.dev`;
-            res.json({ success: true, url: workerUrl, uuid: workerUuid, trPass, subPath, workerName: scriptName });
+            try {
+                await registry.put(regAcc, 'BPB', { script: scriptName, url: workerUrl, kv: namespaceId, d1: null, s: { uuid: workerUuid, trPass, subPath } });
+                registry.forgetSurvey(regAcc);
+            } catch (e) { console.log('[BPB] ثبت در حساب نشد: ' + e.message); }
+            res.json({ success: true, url: workerUrl, uuid: workerUuid, trPass, subPath, workerName: scriptName,
+                reused: !!bpbReuse, codeFrom: bpbCode.from, codeVersion: bpbCode.version || null });
         }
     } catch (e) {
         console.error(e.response?.data || e.message);
-        res.status(500).json({ error: e.response?.data?.errors?.[0]?.message || e.message });
+        res.status(500).json({ error: explainCfError(e) });
     }
 });
+
+/**
+ * A Cloudflare API failure in words the user can act on. The raw message used to reach the toast
+ * as it was — «Uncaught SyntaxError …» for a script Cloudflare would not compile read as a bug in
+ * the app's own page, and a network drop read as «fetch failed».
+ */
+function explainCfError(e) {
+    const err = e && e.response && e.response.data && e.response.data.errors && e.response.data.errors[0];
+    const code = err && err.code;
+    const msg = (err && err.message) || (e && e.message) || 'خطای ناشناخته';
+    if (code === 10021 || /SyntaxError|Uncaught|script_startup|compil/i.test(msg)) {
+        return `کلادفلر کد ورکر را اجرا نکرد (${code || 'script'}): ${msg} — نسخهٔ تازهٔ سازنده ممکن است با تنظیمات این حساب سازگار نباشد؛ دوباره «استقرار» را بزنید یا از استور نسخهٔ قبلی را برگردانید.`;
+    }
+    if (code === 10000 || code === 9109 || /Authentication error|Unauthorized/i.test(msg)) return `توکن کلادفلر اجازهٔ این کار را ندارد (${code || 'auth'}): ${msg}`;
+    if (code === 10037 || /terms of service/i.test(msg)) return 'اول در داشبورد کلادفلر بخش Workers/D1 را یک‌بار باز کنید و قوانین را بپذیرید، بعد دوباره استقرار بزنید.';
+    if (/ENOTFOUND|ECONNRESET|ETIMEDOUT|socket hang up|fetch failed|timeout/i.test(msg)) return `اتصال به api.cloudflare.com برقرار نشد (${msg}) — اینترنت یا پراکسی سیستم را بررسی کنید.`;
+    return (code ? `(${code}) ` : '') + msg;
+}
 
 // API: بررسی وضعیت ساب‌دامین
 
@@ -1143,6 +1383,53 @@ app.post('/api/cloudflare/zeus/sub', async (req, res) => {
         res.json({ success: true, content: text, viaFallback: !!r.viaFallback });
     } catch (e) {
         console.error('[ZEUS Sub Error]:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// A Zeus panel still on the old fixed password gets one of its own (the Zeus settings window).
+// Written into the panel's database over the API (the account's token is the authority, and the
+// filtered workers.dev host is not needed); the panel's own change-password only when the database
+// cannot be found. The account's registry keeps it, so a redeploy or another machine uses it too.
+app.post('/api/cloudflare/zeus/rotate-password', async (req, res) => {
+    const { workerUrl, password = 'Admin123!', email = '', token = '' } = req.body || {};
+    if (!workerUrl || !token) return res.status(400).json({ error: 'workerUrl and token required' });
+    try {
+        const registry = require('./panel-registry');
+        const regAcc = { email, token };
+        const script = registry.scriptOf(workerUrl);
+        const next = crypto.randomBytes(12).toString('base64url');
+        const g = await registry.get(regAcc, 'ZEU').catch(() => null);
+        let d1 = (g && g.script === script && g.d1) || null;
+        if (!d1) { try { d1 = registry.d1Of(await registry.bindings(regAcc, script), 'DB'); } catch (e) { /* the panel's own API below */ } }
+        let done = false;
+        if (d1) {
+            try {
+                await registry.d1Query(regAcc, d1, 'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+                await registry.d1Query(regAcc, d1, "INSERT OR REPLACE INTO settings (key, value) VALUES ('panel_password', ?)",
+                    [crypto.createHash('sha256').update(next).digest('hex')]);
+                done = true;
+            } catch (e) { /* the panel's own API below */ }
+        }
+        if (!done) {
+            const r = await gtFetch(`${workerUrl}/api/change-password`, {
+                method: 'POST',
+                timeoutMs: 25000,
+                headers: { 'Content-Type': 'application/json', Cookie: 'panel_session=' + crypto.createHash('sha256').update(String(password)).digest('hex') },
+                body: JSON.stringify({ current_password: String(password), new_password: next }),
+            });
+            let j = null;
+            try { j = JSON.parse(await r.text()); } catch (e) { /* an HTML page: not the panel's API */ }
+            if (r.status !== 200 || !j || !j.success) {
+                return res.status(r.status === 200 ? 502 : r.status).json({ error: (j && j.error) || `پنل زئوس رمز را عوض نکرد (کد ${r.status}).` });
+            }
+        }
+        let saved = true;
+        try {
+            await registry.put(regAcc, 'ZEU', { script, url: workerUrl, kv: null, d1, s: { password: next } });
+        } catch (e) { saved = false; }
+        res.json({ ok: true, zeusPassword: next, saved });
+    } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
@@ -1320,23 +1607,55 @@ app.post('/api/cloudflare/set-subdomain', async (req, res) => {
 // API: لیست ورکرهای اکانت
 const crypto = require('crypto');
 app.post('/api/cloudflare/deploy-edge', async (req, res) => {
-    const { email, token, workerName, subdomain, proxyIp } = req.body;
+    const { email, token, subdomain, proxyIp } = req.body;
+    let workerName = req.body.workerName;
+    // An API token (Bearer) as well as a Global Key: this route only ever sent X-Auth-Email/Key, so
+    // an account added with a token got «Authentication error» here while BPB deployed fine.
+    const authH = (String(token || '').startsWith('cfat_') || !email)
+        ? { Authorization: `Bearer ${String(token || '').trim()}` }
+        : { 'X-Auth-Email': email, 'X-Auth-Key': token };
     try {
         const accountIdRes = await axios.get('https://api.cloudflare.com/client/v4/accounts', {
-            headers: { 'X-Auth-Email': email, 'X-Auth-Key': token, 'Content-Type': 'application/json' }
+            headers: { ...authH, 'Content-Type': 'application/json' }
         });
         if (!accountIdRes.data.success || accountIdRes.data.result.length === 0) {
             return res.json({ success: false, error: 'Account not found' });
         }
         const accountId = accountIdRes.data.result[0].id;
 
-        const uuid = crypto.randomUUID();
+        let uuid = crypto.randomUUID();
         const password = crypto.randomBytes(8).toString('hex');
 
-        // Create KV Namespace for Edge
-        let namespaceId = '';
-        const headers = { 'X-Auth-Email': email, 'X-Auth-Key': token, 'Content-Type': 'application/json' };
+        // ONE Edge per account, shared with the phone (panel-registry.js): the registry's, else the
+        // one this account record points at (existingUrl), else the newest Edge on the account. Its
+        // UUID is an env secret nobody can read back, so an adopted Edge keeps its Worker and KV and
+        // gets its UUID from the registry — or a new one, written there for the other device.
+        const registry = require('./panel-registry');
+        const regAcc = { email, token, _accountId: accountId };
+        let edgeReuse = null;
         try {
+            const g = await registry.get(regAcc, 'EDG');
+            if (g && g.s && g.s.uuid && await registry.scriptExists(regAcc, g.script)) edgeReuse = { script: g.script, uuid: g.s.uuid, kv: g.kv, from: 'registry' };
+            if (!edgeReuse) {
+                const found = await registry.find(regAcc, 'EDG', { prefer: registry.scriptOf(req.body.existingUrl), force: true });
+                if (found.length) {
+                    const b = await registry.bindings(regAcc, found[0].script);
+                    // The UUID this account record already holds for THAT Worker is still the right one.
+                    const known = found[0].script === registry.scriptOf(req.body.existingUrl) && req.body.existingUuid ? String(req.body.existingUuid) : null;
+                    edgeReuse = { script: found[0].script, uuid: known, kv: registry.kvOf(b, 'KV'), from: 'adopted' };
+                }
+            }
+        } catch (e) { console.log('[Edge] ثبت پنل‌ها: ' + e.message + ' — نصب تازه'); }
+        if (edgeReuse) {
+            workerName = edgeReuse.script;
+            if (edgeReuse.uuid) uuid = edgeReuse.uuid;
+            console.log(`[Edge] همان Edge این حساب به کار می‌رود (${edgeReuse.from}): ${workerName}`);
+        }
+
+        // Create KV Namespace for Edge
+        let namespaceId = (edgeReuse && edgeReuse.kv) || '';
+        const headers = { ...authH, 'Content-Type': 'application/json' };
+        if (!namespaceId) try {
             const kvRes = await axios.post(`https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces`, { title: "edge_db" }, { headers });
             if (kvRes.data.success) namespaceId = kvRes.data.result.id;
         } catch (e) {
@@ -1350,7 +1669,11 @@ app.post('/api/cloudflare/deploy-edge', async (req, res) => {
         }
         if (!namespaceId) throw new Error('Failed to create or find KV namespace edge_db');
 
-        let workerJs = fs.readFileSync(path.join(__dirname, 'public', 'edgeworker.js'), 'utf8');
+        // The developer's newest edgetunnel (store/worker-live.js; BOM removed, fingerprint checked),
+        // else the copy this build ships.
+        const edgeCode = await require('./store/worker-live').codeToDeploy('edge',
+            () => fs.readFileSync(path.join(__dirname, 'public', 'edgeworker.js'), 'utf8'), { log: (m) => console.log(m) });
+        let workerJs = edgeCode.code.charCodeAt(0) === 0xfeff ? edgeCode.code.slice(1) : edgeCode.code;
 
         const metadata = {
             main_module: "worker.js",
@@ -1380,7 +1703,7 @@ app.post('/api/cloudflare/deploy-edge', async (req, res) => {
         body += workerJs + `\r\n`;
         body += `--${boundary}--\r\n`;
 
-        const scriptHeaders = { 'X-Auth-Email': email, 'X-Auth-Key': token, 'Content-Type': `multipart/form-data; boundary=${boundary}` };
+        const scriptHeaders = { ...authH, 'Content-Type': `multipart/form-data; boundary=${boundary}` };
         const putRes = await axios.put(
             `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}`,
             body,
@@ -1393,14 +1716,19 @@ app.post('/api/cloudflare/deploy-edge', async (req, res) => {
 
         const subdomainUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}/subdomain`;
         await axios.post(subdomainUrl, { enabled: true }, {
-            headers: { 'X-Auth-Email': email, 'X-Auth-Key': token, 'Content-Type': 'application/json' },
+            headers: { ...authH, 'Content-Type': 'application/json' },
             validateStatus: () => true
         });
 
-        res.json({ success: true, url: `https://${workerName}.${subdomain}.workers.dev`, uuid, password });
+        const edgeUrl = `https://${workerName}.${subdomain}.workers.dev`;
+        try {
+            await registry.put(regAcc, 'EDG', { script: workerName, url: edgeUrl, kv: namespaceId, d1: null, s: { uuid } });
+            registry.forgetSurvey(regAcc);
+        } catch (e) { console.log('[Edge] ثبت در حساب نشد: ' + e.message); }
+        res.json({ success: true, url: edgeUrl, uuid, password, reused: !!edgeReuse, codeFrom: edgeCode.from, codeVersion: edgeCode.version || null });
     } catch (e) {
         console.error(e.response ? e.response.data : e.message);
-        res.json({ success: false, error: e.response && e.response.data && e.response.data.errors ? e.response.data.errors[0].message : e.message });
+        res.json({ success: false, error: explainCfError(e) });
     }
 });
 
@@ -2242,7 +2570,7 @@ app.post('/api/proxy/system', async (req, res) => {
                 aetherTunWanted = false;
                 aetherStopWatchdog();
                 await aetherReleaseFailClosed('کاربر پراکسی سیستم را انتخاب کرد');
-                tun.stopTun(aetherBroadcastLog, 'user chose system proxy');
+                await tun.stopTunAsync(aetherBroadcastLog, 'user chose system proxy');
                 await tun.verifyTornDown(aetherBroadcastLog);
             });
             aetherBroadcastLog('[TUN] تونل خاموش شد (با پراکسی سیستم قابل جمع نیست).');
@@ -2394,7 +2722,7 @@ app.post('/api/tun', async (req, res) => {
                 aetherTunWanted = false;
                 aetherStopWatchdog();
                 await aetherReleaseFailClosed('کاربر تونل را خاموش کرد');
-                tun.stopTun(aetherBroadcastLog, 'user switched the tunnel off');
+                await tun.stopTunAsync(aetherBroadcastLog, 'user switched the tunnel off');
                 return tun.verifyTornDown(aetherBroadcastLog);
             });
             // TUN was the thing resolving names; with it gone, Windows is back on the ISP's
@@ -2507,7 +2835,7 @@ app.post('/api/tun', async (req, res) => {
         await withTunLock('tun-on-failed', async () => {
             aetherTunWanted = false;
             aetherStopWatchdog();
-            tun.stopTun(aetherBroadcastLog, 'start failed');
+            await tun.stopTunAsync(aetherBroadcastLog, 'start failed');
             await tun.verifyTornDown(aetherBroadcastLog);
         });
         await aetherReleaseFailClosed('راه‌اندازی تونل ناموفق بود');
@@ -3803,7 +4131,7 @@ async function aetherRearmTunIfWanted() {
             await withTunLock('tun-rearm-giveup', async () => {
                 aetherTunWanted = false;
                 aetherStopWatchdog();
-                tun.stopTun(aetherBroadcastLog, 'gave up after 3 rebuild attempts');
+                await tun.stopTunAsync(aetherBroadcastLog, 'gave up after 3 rebuild attempts');
                 await tun.verifyTornDown(aetherBroadcastLog);
             });
             await aetherReleaseFailClosed('تونل بعد از چند تلاش بالا نیامد');
@@ -3853,7 +4181,7 @@ async function aetherRefreshTunUplink() {
             aetherBroadcastLog(`[TUN] ⚠️ این اندپوینت (${outside.join('، ')}) بیرون از محدوده‌های شناخته‌شده است؛ تا پیش از این بازسازی، ترافیک از تونل رد نمی‌شد.`);
         }
         aetherTunOptions = Object.assign({}, aetherTunOptions, { uplinkIps: fresh });
-        tun.stopTun(aetherBroadcastLog, 'engine moved to a new edge');
+        await tun.stopTunAsync(aetherBroadcastLog, 'engine moved to a new edge');
         await tun.startTun(carrying.port, aetherBroadcastLog, aetherTunOptions);
         aetherTunSettledAt = Date.now();
         broadcast('tun', { running: true, wanted: true });
@@ -3985,7 +4313,7 @@ function aetherStartWatchdog() {
                 aetherStopWatchdog();
                 await aetherReleaseFailClosed('موتوری زیر تونل نمانده است');
                 await withTunLock('watchdog-orphan', async () => {
-                    tun.stopTun(aetherBroadcastLog, 'no engine left under the tunnel');
+                    await tun.stopTunAsync(aetherBroadcastLog, 'no engine left under the tunnel');
                     await tun.verifyTornDown(aetherBroadcastLog);
                 });
                 await stopAetherDnsBridge();
@@ -4001,7 +4329,7 @@ function aetherStartWatchdog() {
                 // A dead sing-box over a live engine is directly repairable. The stop takes
                 // the lock as well: stopping a tunnel someone else is mid-way through
                 // building is the same collision as two starts.
-                if (tun.isRunning()) await withTunLock('watchdog-stop', () => { tun.stopTun(aetherBroadcastLog, `watchdog: ${live.verdict}`); });
+                if (tun.isRunning()) await withTunLock('watchdog-stop', () => tun.stopTunAsync(aetherBroadcastLog, `watchdog: ${live.verdict}`));
                 await aetherRearmTunIfWanted();
             }
 
@@ -4395,7 +4723,7 @@ app.get('/api/gateway/status', (req, res) => {
             },
             // Whether a refresh can even be attempted right now, so the panel can say "turn a
             // tunnel on" instead of offering a button that will fail.
-            canRefresh: gateway._internal.liveSocksPorts().length > 0,
+            canRefresh: gateway._internal.liveSocksPorts().length > 0 || require('./vpngate-relay').available(),
         });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -4448,9 +4776,12 @@ app.post('/api/gateway/measure', async (req, res) => {
 
 app.post('/api/gateway/connect', async (req, res) => {
     const o = req.body || {};
-    if (!gateway.isInstalled()) {
+    // A machine without SoftEther is no longer a refusal: connect() installs the shipped client
+    // on the first attempt. Only a build that lost core/softether cannot, and that is a packaging
+    // fault to name as such rather than a program for the user to go and find.
+    if (!gateway.isInstalled() && !gateway.canProvision()) {
         return res.status(409).json({
-            error: 'کلاینت سافت‌اتر روی این سیستم نیست.',
+            error: 'این نسخه از برنامه ناقص است: موتور گیت‌وی همراهش نیامده. برنامه را دوباره نصب کنید.',
             code: 'SOFTETHER_MISSING',
         });
     }
@@ -4503,7 +4834,7 @@ app.get('/api/gateway/list', (req, res) => {
             suggested: gateway.suggest(),
             source: l.source, at: l.at, fetchedAt: l.fetchedAt,
             status: gateway.getStatus(),
-            canRefresh: gateway._internal.liveSocksPorts().length > 0,
+            canRefresh: gateway._internal.liveSocksPorts().length > 0 || require('./vpngate-relay').available(),
         });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -4684,6 +5015,18 @@ app.post('/api/store/worker/rollback', (req, res) => {
     }
 });
 
+// The Cloud window's panels, as products: every copy of one panel on every account, to the code
+// its developer has published on GitHub — and «بررسی گیت‌هاب سازنده» (one panel, or all nine).
+app.post('/api/store/panel/update', (req, res) => {
+    try { res.json(Object.assign({ ok: true }, store.updatePanel(String((req.body && req.body.id) || '')))); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/store/panel/check', (req, res) => {
+    try { res.json(Object.assign({ ok: true }, store.refreshPanels(String((req.body && req.body.id) || '')))); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
 app.post('/api/store/update-all', (req, res) => res.json(Object.assign({ ok: true }, store.updateAll())));
 
 app.post('/api/store/channel/refresh', (req, res) => res.json(Object.assign({ ok: true }, store.refreshChannel())));
@@ -4707,7 +5050,7 @@ app.post('/api/store/app/:action', async (req, res) => {
     try {
         if (action === 'check') return res.json({ ok: true, status: await store.appUpdate.check() });
         if (action === 'download') return res.json({ ok: true, status: store.appUpdate.download() });
-        if (action === 'install') return res.json({ ok: true, result: store.appUpdate.install() });
+        if (action === 'install') return res.json({ ok: true, result: await store.appUpdate.install() });
         res.status(400).json({ ok: false, error: 'عملیات شناخته نشد.' });
     } catch (e) {
         res.status(400).json({ ok: false, error: e.message });
@@ -5198,6 +5541,17 @@ app.post('/api/geph/stop', async (req, res) => {
 });
 
 app.get('/api/geph/logs', (req, res) => res.json({ logs: gephEngine.getLogs() }));
+// «گف»'s own settings (Android 1.2.36 › ۵). They apply on the next connect.
+app.get('/api/geph/settings', (req, res) => res.json({ ok: true, settings: gephEngine.settings(), running: gephEngine.isRunning() }));
+app.post('/api/geph/settings', (req, res) => {
+    try { res.json({ ok: true, settings: gephEngine.saveSettings(req.body || {}), running: gephEngine.isRunning() }); }
+    catch (err) { res.status(400).json({ error: err.message }); }
+});
+// Geph's own announcements (Android 1.2.36 › ۵ «خبرها»), Persian when the network has them.
+app.get('/api/geph/news', async (req, res) => {
+    try { res.json({ ok: true, news: await gephEngine.news(String(req.query.lang || 'fa')) }); }
+    catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 /**
  * The account: make one, look at it, replace it, forget it.
@@ -5226,6 +5580,16 @@ app.post('/api/geph/account', async (req, res) => {
             return res.json({ ok: true, account: info });
         }
         if (action === 'secret') {
+            // Asked first, as Android does: a code that was REPLACED by a newer one, or that is no
+            // account at all, is refused with the reason. If the broker cannot be reached the code is
+            // kept anyway (the user may be offline) and the account check below says so.
+            const code = gephEngine.normalizeSecret(body.secret);
+            if (code) {
+                let st = null;
+                try { st = await gephEngine.secretStatus(code); } catch (e) { st = null; }
+                if (st && st.status === 'retired') return res.status(409).json({ error: 'این کد با یک کد تازه‌تر عوض شده و دیگر کار نمی‌کند — کد تازه را وارد کنید.' });
+                if (st && st.status === 'invalid') return res.status(404).json({ error: 'سرور گف این کد را به‌عنوان حساب نمی‌شناسد.' });
+            }
             gephEngine.saveSecret(body.secret);
             const info = await gephEngine.accountInfo();
             frontBroadcastStatus('geph', gephEngine.getStatus());
@@ -5241,6 +5605,26 @@ app.post('/api/geph/account', async (req, res) => {
             const c = gephEngine._internal.credential();
             if (!c.secret) return res.status(409).json({ error: 'این حساب با نام‌کاربری/رمز ذخیره شده، کدی برای کپی کردن ندارد.' });
             return res.json({ ok: true, secret: c.secret });
+        }
+        if (action === 'legacy') {
+            gephEngine.saveLegacy(body.username, body.password);
+            const info = await gephEngine.accountInfo();
+            frontBroadcastStatus('geph', gephEngine.getStatus());
+            if (!info.ok) { gephEngine.forgetAccount(); return res.status(401).json({ error: info.error || 'نام کاربری یا رمز پذیرفته نشد.' }); }
+            return res.json({ ok: true, account: info });
+        }
+        if (action === 'rotate') {
+            // The new code replaces the old one everywhere; it goes back to the user's own UI to be
+            // written down — like «export», it leaves this machine by no other path.
+            const fresh = await gephEngine.rotateSecret();
+            const info = await gephEngine.accountInfo();
+            return res.json({ ok: true, secret: fresh, account: info });
+        }
+        if (action === 'voucher') return res.json({ ok: true, voucher: await gephEngine.freeVoucher() });
+        if (action === 'redeem') {
+            const days = await gephEngine.redeemVoucher(body.code);
+            const info = await gephEngine.accountInfo();
+            return res.json({ ok: true, days, account: info });
         }
         if (action === 'forget') {
             if (gephEngine.isRunning()) gephEngine.stopGeph();
@@ -6201,8 +6585,19 @@ app.post('/api/update/check', async (req, res) => {
 app.post('/api/update/download', (req, res) => {
     try { res.json(require('./update-manager').startDownload()); } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.post('/api/update/install', (req, res) => {
-    try { res.json(require('./update-manager').install()); } catch (e) { res.status(400).json({ error: e.message }); }
+// «آخرین تغییرات»: the latest PUBLIC release's notes, fresh each time. /releases/latest never
+// returns a draft or a pre-release. Through gtFetch, since GitHub's API may need a detour here.
+app.get('/api/update/latest-notes', async (req, res) => {
+    try {
+        const r = await gtFetch('https://api.github.com/repos/mlmvpn/mlmvpn_windows/releases/latest',
+            { timeoutMs: 15000, headers: { 'User-Agent': 'mlmvpn-windows', Accept: 'application/vnd.github+json' } });
+        if (!r.ok) return res.json({ error: 'HTTP ' + r.status });
+        const j = await r.json();
+        res.json({ name: j.name || '', tag: j.tag_name || '', body: String(j.body || '').slice(0, 60000), published: j.published_at || '' });
+    } catch (e) { res.json({ error: e.message }); }
+});
+app.post('/api/update/install', async (req, res) => {
+    try { res.json(await require('./update-manager').install()); } catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.post('/api/update', (req, res) => {
     try { res.json(require('./update-manager').setAutoDownload(!!(req.body && req.body.autoDownload))); } catch (e) { res.status(400).json({ error: e.message }); }
@@ -6263,7 +6658,7 @@ async function applyAppRoutingNow() {
         if (!tun.isRunning()) return;
         if (aetherTunWanted) {
             aetherTunOptions = Object.assign({}, aetherTunOptions, { uplinkIps: aether.getUplinkIps() });
-            tun.stopTun(aetherBroadcastLog, 'app-routing changed');
+            await tun.stopTunAsync(aetherBroadcastLog, 'app-routing changed');
             await tun.startTun(aether.SOCKS_PORT, aetherBroadcastLog, aetherTunOptions);
             aetherTunSettledAt = Date.now();
         } else {
@@ -6412,9 +6807,22 @@ app.post('/api/v2ray/test-nodes', async (req, res) => {
     };
 
     let summary = { results: [], coreFailures: 0 };
+    // Self-healing for the whole list (cf-edge-heal.js › healBatch): with no verdict yet, ONE
+    // Cloudflare config on a literal IPv4 settles it; then each node is moved from the verdict
+    // alone, so hundreds of rows cost one probe, not seconds each.
+    let testList = nodes, testCleanIp = cleanIp, testCleanPort = cleanPort;
+    if (testType !== 'ping') {
+        try {
+            const hb = await require('./cf-edge-heal').healBatch(nodes, cleanIp, cleanPort, { log });
+            if (hb.healed) {
+                testList = hb.nodes;
+                if (hb.cleanIpFolded) { testCleanIp = null; testCleanPort = null; }
+            }
+        } catch (e) { log('[CfEdgeHeal] ' + e.message); }
+    }
     try {
         summary = await tester.testNodes({
-            nodes, cleanIp, cleanPort, testType, settings,
+            nodes: testList, cleanIp: testCleanIp, cleanPort: testCleanPort, testType, settings,
             isAborted: () => aborted,
             log,
             onResult: (r) => write(Object.assign({ testType }, r)),
@@ -6506,10 +6914,24 @@ function withV2rayStartLock(fn) {
 }
 
 app.post('/api/v2ray/start', async (req, res) => {
-    const { uri, cleanIp, cleanPort, realIp, useSystemProxy, solo } = req.body;
-    if (!uri) return res.status(400).json({ error: 'Config URI is required' });
+    const { uri: askedUri, cleanIp: askedCleanIp, cleanPort: askedCleanPort, realIp, useSystemProxy, solo } = req.body;
+    if (!askedUri) return res.status(400).json({ error: 'Config URI is required' });
+    let uri = askedUri, cleanIp = askedCleanIp, cleanPort = askedCleanPort;
+    let healedTo = null;
     try {
       await withV2rayStartLock(async () => {
+        // Self-healing (cf-edge-heal.js): a Cloudflare-fronted config on an IPv4 edge moves to an
+        // IPv6 edge when IPv4 carries no data on this network — measured, never assumed; a config
+        // that works as it is is never touched. Iran's filtering of 2026-09-28 left CF IPv4 passing
+        // TLS and the WebSocket upgrade and then carrying nothing. What is REMEMBERED below is the
+        // link the user chose, so the next start measures again rather than inheriting a detour.
+        try {
+            const h = await require('./cf-edge-heal').healForConnect(askedUri, askedCleanIp, askedCleanPort, {
+                probe: true,
+                log: (m) => { try { broadcast('core_log', m); } catch (e) {} console.log(m); },
+            });
+            if (h.healed) { uri = h.uri; cleanIp = h.cleanIp; cleanPort = h.cleanPort; healedTo = h.to; }
+        } catch (e) { console.warn('[CfEdgeHeal] skipped:', e.message); }
         // `solo`: use the config that was asked for and nothing else.
         //
         // generateXrayConfig always merged every «زیرساخت ابری» config into a leastPing
@@ -6549,10 +6971,10 @@ app.post('/api/v2ray/start', async (req, res) => {
         try {
             const sniMgr = require('./sni-manager');
             const sni = /@127\.0\.0\.1:40443(?:[/?#]|$)/.test(String(uri)) && sniMgr.isSniRunning() ? sniMgr.getActiveSniConfig() : null;
-            require('./system-settings').rememberConnection({ kind: 'v2ray', uri, cleanIp, cleanPort, realIp, useSystemProxy: !!useSystemProxy, sni, tun: v2rayTunWanted, tunSource: v2rayTunSource });
+            require('./system-settings').rememberConnection({ kind: 'v2ray', uri: askedUri, cleanIp: askedCleanIp, cleanPort: askedCleanPort, realIp, useSystemProxy: !!useSystemProxy, sni, tun: v2rayTunWanted, tunSource: v2rayTunSource });
         } catch (e) { /* nothing to replay */ }
       });
-        res.json({ message: 'Xray Started' });
+        res.json({ message: 'Xray Started', healedTo });
     } catch (err) {
         // The message reaches the user verbatim, so it carries the core's own words (see
         // xray-manager.startXray) and not `(__dirname: G:\ip scanner)` glued onto the end of
@@ -6855,7 +7277,7 @@ app.post('/api/v2ray/tun', async (req, res) => {
                 aetherTunWanted = false;
                 aetherStopWatchdog();
                 await aetherReleaseFailClosed('کاربر تونل V2Ray را انتخاب کرد');
-                tun.stopTun(tunBroadcastLog, 'handover to the V2Ray tunnel');
+                await tun.stopTunAsync(tunBroadcastLog, 'handover to the V2Ray tunnel');
                 await tun.verifyTornDown(tunBroadcastLog);
             }
 
@@ -7362,6 +7784,7 @@ function startServer() {
             server.listen(portToTry, '127.0.0.1', () => {
                 server.removeListener('error', onError);
                 const actualPort = server.address().port;
+                localPort = actualPort;
                 console.log('Server running on port ' + actualPort);
                 try {
                     if (!forcedPort) fs.writeFileSync(portFile, actualPort.toString(), 'utf8');
@@ -7558,11 +7981,26 @@ require('./vodi/routes')(app, { broadcastLog: aetherBroadcastLog });
 // Its data plane is handed back here so the «بازی» tab can race this tunnel against the
 // other engines without the user having to come to this panel and connect it by hand.
 let gtDataPlane = null;
+// Whether the game tab's own start is what brought the v2 engine up — see stopGithubTunnel.
+let gtStartedByGame = false;
 require('./github-tunnel/routes')(app, {
     broadcastLog: aetherBroadcastLog,
     broadcast,
     readSystemProxy,
     expose: (api) => { gtDataPlane = api; },
+    // Its full tunnel (v2) is the shared adapter, so it takes the same lock as every other
+    // feature that builds or tears that tunnel down…
+    withTunLock,
+    // …and does not build one under a feature that means to hold the adapter (a WARP tunnel
+    // re-arming, the V2Ray switch) — that feature's watchdog would only take it straight back.
+    tunWantedElsewhere: () => aetherTunWanted || v2rayTunWanted,
+    // A WARP engine connected beside it in proxy mode keeps Windows pointed at the local DNS
+    // bridge, and a bridge under a live tunnel is a machine with no DNS (see tunTookOverDns):
+    // it comes down before that tunnel goes up, and back once it is gone.
+    dnsBridge: {
+        stop: () => stopAetherDnsBridge(),
+        restore: async () => { if (aetherLikeConnected() && !tun.isRunning()) await startAetherDnsBridge(); },
+    },
 });
 
 // ============================================================
@@ -7653,7 +8091,6 @@ app.post('/api/openvpn/measure', async (req, res) => {
         const hosts = Array.isArray(req.body && req.body.hosts) ? req.body.hosts : null;
         const results = await openvpn.verify(hosts, {
             concurrency: 8,
-            via: (req.body && req.body.via) || 'auto',
             stopAfter: +(req.body && req.body.stopAfter) || 0,
             onBegin: (b) => write(Object.assign({ type: 'begin' }, b)),
             onResult: (r) => write(Object.assign({ type: 'result' }, r)),
@@ -7675,15 +8112,348 @@ app.post('/api/openvpn/connect', async (req, res) => {
         }
         const host = String((req.body && req.body.host) || '').trim();
         if (!host) return res.status(400).json({ ok: false, error: 'سروری انتخاب نشده است.' });
+        // DIRECT, always (openvpn-manager › directPath) — no front, whatever the page sends.
         const out = await openvpn.connect(host, {
             routeNoPull: !!(req.body && req.body.routeNoPull),
-            via: (req.body && req.body.via) || 'auto',
         });
         broadcast('openvpn', { phase: 'connecting', host });
         res.json(Object.assign({ ok: true }, out));
     } catch (e) {
         res.status(500).json({ ok: false, error: e.message });
     }
+});
+
+// ── «مصرف روزانه»: every account's Worker requests, hour by hour, for the Iranian week ──────
+// Saturday 00:00 Asia/Tehran (UTC+3:30, no DST since 2022) to now. The page turns hours into
+// Tehran days itself. Five-minute cache per account; an account whose token cannot read analytics
+// says so instead of reading as zero. Also logs Cloudflare's own failure breakdown (cf-errors.js).
+const usageWeekCache = new Map();
+function tehranWeekStartUtc(now = Date.now()) {
+    const T = 3.5 * 3600 * 1000;
+    const local = new Date(now + T);                 // the wall clock in Tehran, read with UTC getters
+    const dow = local.getUTCDay();                   // 0 Sunday … 6 Saturday
+    const back = (dow + 1) % 7;                      // days since Saturday
+    const sat = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - back);
+    return new Date(sat - T);
+}
+app.get('/api/cloud/usage-week', async (req, res) => {
+    let accs = [];
+    try {
+        const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.mlmvpn', 'user_data.json'), 'utf8'));
+        accs = typeof d.cf_accounts === 'string' ? JSON.parse(d.cf_accounts) : (d.cf_accounts || []);
+    } catch (e) { accs = []; }
+    const start = tehranWeekStartUtc();
+    const force = req.query.force === '1';
+    const out = await Promise.all(accs.map(async (a) => {
+        const key = a.id + '|' + start.toISOString();
+        const hit = usageWeekCache.get(key);
+        if (!force && hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.v;
+        const headers = (String(a.token || '').startsWith('cfat_') || !a.email)
+            ? { Authorization: 'Bearer ' + a.token } : { 'X-Auth-Email': a.email, 'X-Auth-Key': a.token };
+        let v;
+        try {
+            const accR = await axios.get('https://api.cloudflare.com/client/v4/accounts', { headers, timeout: 15000 });
+            const accountId = accR.data && accR.data.result && accR.data.result[0] && accR.data.result[0].id;
+            if (!accountId) throw new Error('no account');
+            const q = `query U($a: String!, $s: String!, $e: String!) { viewer { accounts(filter: {accountTag: $a}) {
+                workersInvocationsAdaptive(limit: 10000, filter: {datetime_geq: $s, datetime_leq: $e}) { sum { requests } dimensions { datetimeHour } } } } }`;
+            const g = await axios.post('https://api.cloudflare.com/client/v4/graphql',
+                { query: q, variables: { a: accountId, s: start.toISOString(), e: new Date().toISOString() } }, { headers, timeout: 20000 });
+            if (g.data && g.data.errors && g.data.errors.length) throw new Error(g.data.errors[0].message);
+            const rows = (((g.data || {}).data || {}).viewer || {}).accounts?.[0]?.workersInvocationsAdaptive || [];
+            const hours = {};
+            for (const r of rows) { const h = r.dimensions && r.dimensions.datetimeHour; if (h) hours[h] = (hours[h] || 0) + ((r.sum && r.sum.requests) || 0); }
+            v = { id: a.id, email: a.email || a.name || '', hours };
+            require('./cf-errors').logFor(headers, accountId, (m) => { console.log(m); try { broadcast('core_log', m); } catch (e) {} });
+        } catch (e) {
+            v = { id: a.id, email: a.email || a.name || '', error: e.response ? `HTTP ${e.response.status}` : e.message };
+        }
+        usageWeekCache.set(key, { at: Date.now(), v });
+        return v;
+    }));
+    res.json({ ok: true, weekStart: start.toISOString(), now: new Date().toISOString(), accounts: out });
+});
+
+// ── «میدان کانفیگ» (arena.js) ────────────────────────────────────────────────────
+// The race runs here; the window polls /state and also gets 'arena' pushes (at most 4 a second).
+let localPort = Number(process.env.PORT) || 3000;
+const arena = require('./arena');
+// BPB and Edge install through the Cloud window's own routes — the same code, the same newest
+// developer build (worker-live) — called over loopback so nothing is duplicated.
+arena.setInstallers({
+    BPB: async (acc, onStep) => {
+        onStep('نصب BPB از آخرین نسخهٔ سازنده…');
+        const r = (await axios.post(`http://127.0.0.1:${localPort}/api/cloudflare/deploy`, { email: acc.email, token: acc.token, panelType: 'BPB', existingUrl: acc.url || '' }, { timeout: 300000, validateStatus: () => true })).data || {};
+        if (!r.success) throw new Error(r.error || 'نصب BPB نشد');
+        return { url: r.url, uuid: r.uuid, trPass: r.trPass, subPath: r.subPath };
+    },
+    EDG: async (acc, onStep) => {
+        const post = async (p, b) => (await axios.post(`http://127.0.0.1:${localPort}${p}`, b, { timeout: 300000, validateStatus: () => true })).data || {};
+        onStep('بررسی زیردامنه…');
+        let sub = await post('/api/cloudflare/check-subdomain', { email: acc.email, token: acc.token });
+        let subdomain = sub.success && sub.currentSubdomain;
+        if (!subdomain) {
+            const made = await post('/api/cloudflare/set-subdomain', { email: acc.email, token: acc.token });
+            if (!made.success) throw new Error(made.error || 'زیردامنهٔ workers.dev ساخته نشد');
+            subdomain = made.subdomain;
+        }
+        onStep('نصب Edge از آخرین نسخهٔ سازنده…');
+        const r = await post('/api/cloudflare/deploy-edge', { email: acc.email, token: acc.token, workerName: generateSafeWorkerName(), subdomain, proxyIp: acc.edgeProxyIp || '', existingUrl: acc.edgeUrl || '', existingUuid: acc.edgeUuid || '' });
+        if (!r.success) throw new Error(r.error || 'نصب Edge نشد');
+        return { edgeUrl: r.url, edgeUuid: r.uuid };
+    },
+    // An upsert: the route reuses the account's Zeus panel and its database when there is one.
+    ZEUS: async (acc, onStep) => {
+        onStep('نصب یا بروزرسانی زئوس (همان پنل و دیتابیس حساب، اگر هست)…');
+        const r = (await axios.post(`http://127.0.0.1:${localPort}/api/cloudflare/deploy`, { email: acc.email || '', token: acc.token, panelType: 'ZEUS', zeusPassword: acc.zeusPassword || undefined }, { timeout: 300000, validateStatus: () => true })).data || {};
+        if (!r.success) throw new Error(r.error || 'نصب زئوس نشد');
+        return r.zeusPassword ? { zeusUrl: r.url, zeusPassword: r.zeusPassword } : { zeusUrl: r.url };
+    },
+});
+{
+    let last = 0, timer = null;
+    arena.onChange(() => {
+        const now = Date.now();
+        const send = () => { last = Date.now(); timer = null; try { broadcast('arena', arena.state); } catch (e) {} };
+        if (now - last > 250) send(); else if (!timer) timer = setTimeout(send, 250);
+    });
+}
+// `live` is the scoreboard of what has been measured so far — the track places cars by it.
+app.get('/api/arena/state', (req, res) => res.json({ ok: true, state: arena.state, latest: arena.latest(),
+    live: arena.score(arena.state.lanes.map((l) => l.entry)) }));
+// BPB / Edge records made by a race, until the window has merged them into cf_accounts.
+app.get('/api/arena/account-patches', (req, res) => res.json({ ok: true, patches: arena.pendingPatches() }));
+app.post('/api/arena/account-patches/ack', (req, res) => { arena.ackPatches((req.body || {}).ids); res.json({ ok: true }); });
+// The same queue under its general name: arena installs AND the account's panel registry (sync).
+app.get('/api/account-patches', (req, res) => res.json({ ok: true, patches: require('./account-patches').pending() }));
+app.post('/api/account-patches/ack', (req, res) => { require('./account-patches').ack((req.body || {}).ids); res.json({ ok: true }); });
+app.get('/api/arena/history', (req, res) => res.json({ ok: true, history: arena.history() }));
+// The race works on the account's SHARED installs (panel-registry.js): synced first, so a panel the
+// phone installed is raced, not installed a second time. Quick — no survey of the whole account.
+async function arenaSync(accId) {
+    try { await require('./cloud-panels').sync(accId, { withDuplicates: false }); } catch (e) { /* the race decides with what is known */ }
+}
+app.post('/api/arena/plan', async (req, res) => {
+    const accId = String((req.body || {}).accId || '');
+    await arenaSync(accId);
+    try { res.json({ ok: true, plan: arena.plan(accId) }); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+app.post('/api/arena/start', (req, res) => {
+    const b = req.body || {};
+    try { res.json({ ok: true, state: arena.start(String(b.accId || ''), b.mode === 'FULL' ? 'FULL' : 'QUICK', Array.isArray(b.only) ? b.only : null) }); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+app.post('/api/arena/cancel', (req, res) => { arena.cancel(); res.json({ ok: true }); });
+app.post('/api/arena/reset', (req, res) => { arena.reset(); res.json({ ok: true }); });
+
+// ── Spider, Netra, Gozargah, Nova on the user's Cloudflare account (cloud-panels.js) ──────
+// The Cloud window sends the account id; the account's token is read server-side from the stored
+// cf_accounts, never echoed back. Deploy steps go to the log as they happen.
+const cloudPanels = require('./cloud-panels');
+/**
+ * «هماهنگ با گوشی»: the account's panel registry (panel-registry.js) → this machine. The six panels
+ * of cloud-panels.js update their own records; BPB, Edge and Zeus live in the Cloud window's account,
+ * so what the registry says about them is queued for the window (account-patches.js), and what this
+ * account has that the registry does not know yet is published for the phone. Also every duplicate
+ * Worker of a panel kind on the account — listed, never removed here.
+ */
+app.post('/api/cloud-panels/sync', async (req, res) => {
+    const b = req.body || {};
+    const accId = String(b.accId || '');
+    try {
+        const cp = require('./cloud-panels');
+        const registry = require('./panel-registry');
+        const out = await cp.sync(accId, { fallbackAcc: b.account, withDuplicates: b.duplicates !== false });
+        const acc = cp._cf.account(accId, b.account);
+        const regAll = await registry.all(acc).catch(() => ({}));
+        const patch = {};
+        const same = (a, c) => String(a || '').replace(/\/$/, '') === String(c || '').replace(/\/$/, '');
+        // BPB
+        const gB = regAll.BPB;
+        if (gB && gB.s && await registry.scriptExists(acc, gB.script).catch(() => false)) {
+            if (!same(acc.url, gB.url) || acc.uuid !== gB.s.uuid) Object.assign(patch, { url: gB.url, uuid: gB.s.uuid, trPass: gB.s.trPass, subPath: gB.s.subPath });
+            out.panels.BPB = same(acc.url, gB.url) ? 'same' : 'from-registry';
+        } else if (acc.url && acc.uuid && await registry.scriptExists(acc, registry.scriptOf(acc.url)).catch(() => false)) {
+            await registry.put(acc, 'BPB', { script: registry.scriptOf(acc.url), url: acc.url, kv: null, d1: null, s: { uuid: acc.uuid, trPass: acc.trPass, subPath: acc.subPath } }).catch(() => {});
+            out.panels.BPB = 'published';
+        } else out.panels.BPB = 'none';
+        // Edge
+        const gE = regAll.EDG;
+        if (gE && gE.s && await registry.scriptExists(acc, gE.script).catch(() => false)) {
+            if (!same(acc.edgeUrl, gE.url) || acc.edgeUuid !== gE.s.uuid) Object.assign(patch, { edgeUrl: gE.url, edgeUuid: gE.s.uuid });
+            out.panels.EDG = same(acc.edgeUrl, gE.url) ? 'same' : 'from-registry';
+        } else if (acc.edgeUrl && acc.edgeUuid && await registry.scriptExists(acc, registry.scriptOf(acc.edgeUrl)).catch(() => false)) {
+            await registry.put(acc, 'EDG', { script: registry.scriptOf(acc.edgeUrl), url: acc.edgeUrl, kv: null, d1: null, s: { uuid: acc.edgeUuid } }).catch(() => {});
+            out.panels.EDG = 'published';
+        } else out.panels.EDG = 'none';
+        // Zeus
+        const gZ = regAll.ZEU;
+        if (gZ && await registry.scriptExists(acc, gZ.script).catch(() => false)) {
+            if (!same(acc.zeusUrl, gZ.url)) Object.assign(patch, { zeusUrl: gZ.url });
+            if (gZ.s && gZ.s.password && acc.zeusPassword !== gZ.s.password) patch.zeusPassword = gZ.s.password;
+            // The password this account holds for that same panel, when the registry has none yet.
+            else if (!(gZ.s && gZ.s.password) && acc.zeusPassword && same(acc.zeusUrl, gZ.url)) {
+                await registry.put(acc, 'ZEU', { script: gZ.script, url: gZ.url, kv: gZ.kv || null, d1: gZ.d1 || null, s: { password: acc.zeusPassword } }).catch(() => {});
+            }
+            out.panels.ZEU = same(acc.zeusUrl, gZ.url) ? 'same' : 'from-registry';
+        } else if (acc.zeusUrl && await registry.scriptExists(acc, registry.scriptOf(acc.zeusUrl)).catch(() => false)) {
+            await registry.put(acc, 'ZEU', { script: registry.scriptOf(acc.zeusUrl), url: acc.zeusUrl, kv: null, d1: null, s: acc.zeusPassword ? { password: acc.zeusPassword } : {} }).catch(() => {});
+            out.panels.ZEU = 'published';
+        } else out.panels.ZEU = 'none';
+        if (Object.keys(patch).length) out.patch = require('./account-patches').push(accId, patch, 'registry');
+        res.json(Object.assign({ ok: true }, out));
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/cloud-panels/duplicate/remove', async (req, res) => {
+    const b = req.body || {};
+    try { res.json(Object.assign({ ok: true }, await require('./cloud-panels').removeDuplicate(String(b.accId || ''), String(b.script || ''), { fallbackAcc: b.account }))); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/cloud-panels/status', (req, res) => {
+    try { res.json({ ok: true, panels: cloudPanels.PANELS, status: cloudPanels.status(String(req.query.accId || '')) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+// The menu bar's panel lamps: every panel of cloud-panels.js summed over the accounts the Cloud
+// window holds (`acc` = their ids, comma-separated). Local records only — no network, so the lamps
+// can ask every few seconds.
+app.get('/api/cloud-panels/summary', (req, res) => {
+    try {
+        const out = {};
+        for (const code of Object.keys(cloudPanels.PANELS)) out[code] = { installed: 0, configs: 0 };
+        const ids = String(req.query.acc || '').split(',').map((s) => s.trim()).filter(Boolean);
+        for (const id of ids) {
+            for (const [code, s] of Object.entries(cloudPanels.status(id))) {
+                if (!s.installed || !out[code]) continue;
+                out[code].installed++;
+                out[code].configs += s.configs || 0;
+            }
+        }
+        res.json({ ok: true, panels: out });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+// Spider first: its own routes must not be taken by the generic ':code' ones below.
+app.post('/api/cloud-panels/spider/:action', async (req, res) => {
+    const b = req.body || {};
+    const accId = String(b.accId || '');
+    try {
+        const s = cloudPanels.spider;
+        let out;
+        switch (req.params.action) {
+            case 'users': out = { users: (await s.users(accId)).map((u) => Object.assign({}, u, { link: s.link(accId, u) })) }; break;
+            case 'save': out = { user: await s.save(accId, b.user) }; break;
+            case 'delete': await s.remove(accId, String(b.uuid || '')); out = {}; break;
+            case 'status': out = { status: await s.status(accId, !!b.probe) }; break;
+            case 'exits': await s.pushExits(accId, Array.isArray(b.exits) ? b.exits : []); out = {}; break;
+            default: return res.status(404).json({ ok: false, error: 'نامعلوم' });
+        }
+        res.json(Object.assign({ ok: true }, out));
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/cloud-panels/:code/deploy', async (req, res) => {
+    const { accId, email, token } = req.body || {};
+    try {
+        const r = await cloudPanels.deploy(req.params.code, String(accId || ''), {
+            fallbackAcc: token ? { email, token } : null,
+            onStep: (m) => { console.log(m); try { broadcast('core_log', m); } catch (e) {} },
+        });
+        res.json(Object.assign({ ok: true }, r));
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/cloud-panels/:code/configs', async (req, res) => {
+    try { res.json({ ok: true, configs: await cloudPanels.configs(req.params.code, String((req.body || {}).accId || '')) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/cloud-panels/:code/remove', async (req, res) => {
+    const { accId, email, token } = req.body || {};
+    try { res.json(Object.assign({ ok: true }, await cloudPanels.remove(req.params.code, String(accId || ''), { fallbackAcc: token ? { email, token } : null }))); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/cloud-panels/:code/web', (req, res) => {
+    try { res.json(Object.assign({ ok: true }, cloudPanels.webPanel(req.params.code, String((req.body || {}).accId || '')))); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+// ── the user's OWN profiles and TunnelBear (openvpn-profiles.js) ──────────────────
+// «کانفیگ خودمان را نمی‌توانیم در اوپن‌وی‌پی‌ان اضافه کنیم» — import (several files at once, with
+// their companion certificates), list, star, delete, measure, connect; and TunnelBear accounts.
+const ovpnProfiles = require('./openvpn-profiles');
+
+app.get('/api/openvpn/profiles', (req, res) => {
+    try { res.json({ ok: true, profiles: ovpnProfiles.list(), accounts: ovpnProfiles.accounts(), connectedId: openvpn.getStatus().profileId || null }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/openvpn/profiles/import', (req, res) => {
+    try {
+        const files = Array.isArray(req.body && req.body.files) ? req.body.files.slice(0, 200) : [];
+        if (!files.length) return res.status(400).json({ ok: false, error: 'فایلی انتخاب نشده است.' });
+        res.json(Object.assign({ ok: true }, ovpnProfiles.importFiles(files)));
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/openvpn/profiles/favorite', (req, res) => {
+    try { res.json(ovpnProfiles.setFavorite(String(req.body.id || ''), !!req.body.favorite)); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/openvpn/profiles/delete', (req, res) => {
+    try { res.json(ovpnProfiles.remove(String(req.body.id || ''), { connectedId: openvpn.getStatus().profileId })); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/openvpn/profiles/measure', async (req, res) => {
+    try {
+        const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids : null;
+        const profiles = await ovpnProfiles.measure(ids, { onResult: (r) => broadcast('openvpn', { profileProbe: r }) });
+        res.json({ ok: true, profiles });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/openvpn/profiles/connect', async (req, res) => {
+    try {
+        if (aetherTunWanted || v2rayTunWanted || (tun.isRunning && tun.isRunning())) {
+            return res.status(409).json({ ok: false, code: 'TUN_UP', error: 'یک تونل کامل دیگر روشن است. اول آن را خاموش کنید.' });
+        }
+        let id = String((req.body && req.body.id) || '');
+        // «سریع‌ترین»: the fastest profile measured in the last ten minutes.
+        if (id === 'fastest') {
+            const f = ovpnProfiles.fastest();
+            if (!f) return res.status(400).json({ ok: false, error: 'هنوز هیچ سروری سنجیده نشده — اول «سنجش تأخیر» را بزنید.' });
+            id = f.id;
+        }
+        if (!id) return res.status(400).json({ ok: false, error: 'پروفایلی انتخاب نشده است.' });
+        const out = await openvpn.connectProfile(id, {
+            routeNoPull: !!(req.body && req.body.routeNoPull),
+        });
+        broadcast('openvpn', { phase: 'connecting', host: out.host });
+        res.json(Object.assign({ ok: true }, out));
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
+app.post('/api/openvpn/accounts/save', (req, res) => {
+    try {
+        const b = req.body || {};
+        const r = ovpnProfiles.saveAccount({ id: b.id || null, username: String(b.username || '').trim(), password: String(b.password || '') },
+            { busyId: openvpn.isRunning() ? openvpn.getStatus().accountId || null : null });
+        res.json(Object.assign({ ok: true, accounts: ovpnProfiles.accounts() }, r));
+    } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/openvpn/accounts/delete', (req, res) => {
+    try {
+        ovpnProfiles.deleteAccount(String(req.body.id || ''), { busyId: openvpn.isRunning() ? openvpn.getStatus().accountId || null : null });
+        res.json({ ok: true, accounts: ovpnProfiles.accounts() });
+    } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/openvpn/accounts/prefs', (req, res) => {
+    try { res.json({ ok: true, accounts: ovpnProfiles.setAccountPrefs(req.body || {}) }); }
+    catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
 
 app.post('/api/openvpn/disconnect', async (req, res) => {
@@ -7714,7 +8484,9 @@ app.get('/api/openvpn/list', (req, res) => {
             suggested: openvpn.suggest(),
             source: l.source, at: l.at, fetchedAt: l.fetchedAt,
             status: openvpn.getStatus(),
-            fronts: openvpn.liveSocksPorts().map((p) => ({ port: p, name: openvpn.viaName(p) })),
+            // The panel read this and it was never sent, so it always said «turn a tunnel on». The
+            // shared archive refreshes through the user's relay Worker too (vpngate-relay.js).
+            canRefresh: gateway._internal.liveSocksPorts().length > 0 || require('./vpngate-relay').available(),
         });
     } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
@@ -7773,23 +8545,7 @@ app.post('/api/openvpn/select', (req, res) => {
     catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-/**
- * Which front carries the tunnel.
- *
- * Refused mid-session: the front is the carrier the live OpenVPN process is already talking
- * through, so changing it means reconnecting, and a picker that silently disagreed with what
- * the machine is doing is worse than no picker.
- */
-app.post('/api/openvpn/front', (req, res) => {
-    try {
-        if (openvpn.isRunning()) {
-            return res.status(409).json({ ok: false, error: 'برای تغییر مسیر، اول اتصال را قطع کنید.' });
-        }
-        const front = openvpn.setFront((req.body || {}).front);
-        broadcast('openvpn', openvpn.getStatus());
-        res.json({ ok: true, front });
-    } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
-});
+// (The front picker, /api/openvpn/front, is gone: OpenVPN connects DIRECTLY — see directPath.)
 
 require('./netdiag/routes')(app, {
     broadcast,
@@ -7839,7 +8595,7 @@ require('./game/routes')(app, {
             v2rayTunWanted = false;
             aetherStopWatchdog();
             await aetherReleaseFailClosed(reason);
-            tun.stopTun(aetherBroadcastLog, 'disconnect-everything');
+            await tun.stopTunAsync(aetherBroadcastLog, 'disconnect-everything');
             await tun.verifyTornDown(aetherBroadcastLog);
         }
     },
@@ -7952,6 +8708,23 @@ require('./game/routes')(app, {
         // drift out of sync with the first one within a release.
         async startGithubTunnel() {
             if (!gtDataPlane) throw new Error('ماژول تونل GitHub آماده نیست.');
+            // v2 publishes a SOCKS port that carries UDP (XUDP inside its WebSocket), so it is
+            // started as a bare engine and measured and routed like every other one — nothing
+            // machine-wide happens. It needs a live cloud session: bringing a runner up is minutes
+            // and the account's allowance, which a game race must not spend behind the user's back.
+            const plane = gtDataPlane.dataPlane ? gtDataPlane.dataPlane() : 'v1';
+            if (!plane) throw new Error('نشست ابری فعالی برای تونل GitHub نیست — اول از پنل خودش یک نشست بسازید.');
+            if (plane === 'v2') {
+                // Already up in any mode: its port serves the measurement as it is, and the user's
+                // own connection — a full tunnel included — is left exactly as they made it.
+                let up = false;
+                try { up = !!gtDataPlane.status().connected; } catch {}
+                gtStartedByGame = false;
+                if (up) return;
+                await gtDataPlane.bringUp('engine');
+                gtStartedByGame = true;
+                return;
+            }
             if (aetherTunWanted || v2rayTunWanted) throw new Error('اول تونل دیگر را خاموش کن.');
             // Was it already up before we touched it? This is the same rule engines.release
             // follows, and it matters more here than anywhere else: a failed measurement
@@ -7986,6 +8759,14 @@ require('./game/routes')(app, {
         },
         async stopGithubTunnel() {
             if (!gtDataPlane) return;
+            // v2: only what the game itself brought up. engines.release cannot tell — it calls
+            // this whenever a start was ASKED for — and a user's full tunnel must not end because
+            // a race measured through it.
+            if (gtDataPlane.dataPlane && gtDataPlane.dataPlane() === 'v2') {
+                const mine = gtStartedByGame;
+                gtStartedByGame = false;
+                if (!mine) return;
+            }
             await gtDataPlane.teardown();
         },
     },

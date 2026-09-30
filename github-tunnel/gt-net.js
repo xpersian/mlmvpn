@@ -143,9 +143,175 @@ function systemProxyAgent() {
     }
 }
 
+// ── WHEN THIS MACHINE CANNOT LOOK A NAME UP ─────────────────────────────────────────
+//
+// The moment a GitHub Tunnel repair needs GitHub most — the runner gone, the full tunnel down,
+// the kill switch holding the machine closed — is the moment Windows cannot resolve anything:
+// its lookups go out from the DNS Client service, which the kill switch does not let out, and the
+// router's DNS is blocked on top (gt-guard.js › THE DNS LEAK). This app IS on the allow-list. So a
+// lookup that failed is asked again from here: DNS over TCP to public resolvers — the lines this
+// was measured on hijack UDP/53 and nothing else (tun-manager.js › engine-dns) — and failing that,
+// the last address that worked for the name. Control-plane names only; the tunnel's own traffic
+// never comes here.
+const os = require('os');
+const path = require('path');
+const OWN_RESOLVERS = ['8.8.8.8', '1.1.1.1', '9.9.9.9'];
+const LKG_FILE = path.join(os.homedir(), '.mlmvpn', 'gt-lkg-dns.json');
+const LKG_MAX = 64;
+let lkg = null;
+const lkgRefreshedAt = new Map();
+
+function loadLkg() {
+    if (lkg) return lkg;
+    try { lkg = JSON.parse(require('fs').readFileSync(LKG_FILE, 'utf8')) || {}; } catch (e) { lkg = {}; }
+    return lkg;
+}
+function saveLkg() {
+    try {
+        const fs = require('fs');
+        fs.mkdirSync(path.dirname(LKG_FILE), { recursive: true });
+        const keys = Object.keys(lkg).sort((a, b) => (lkg[b].at || 0) - (lkg[a].at || 0)).slice(0, LKG_MAX);
+        const trimmed = {};
+        for (const k of keys) trimmed[k] = lkg[k];
+        lkg = trimmed;
+        fs.writeFileSync(LKG_FILE, JSON.stringify(lkg));
+    } catch (e) { /* a cache, never a failure */ }
+}
+function remember(host, ips) {
+    const good = (ips || []).filter((ip) => require('net').isIPv4(ip));
+    if (!good.length) return;
+    loadLkg()[host] = { ips: good.slice(0, 8), at: Date.now() };
+    saveLkg();
+}
+const validName = (n) => typeof n === 'string' && n.length < 254 && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(n) && !require('net').isIP(n);
+
+/** A DNS question for the A records of `name`, framed for TCP (two-byte length first). */
+function dnsQuery(name, id) {
+    const labels = name.split('.').filter(Boolean);
+    const qname = Buffer.concat([...labels.map((l) => Buffer.concat([Buffer.from([l.length]), Buffer.from(l, 'ascii')])), Buffer.from([0])]);
+    const header = Buffer.alloc(12);
+    header.writeUInt16BE(id, 0);
+    header.writeUInt16BE(0x0100, 2);   // standard query, recursion desired
+    header.writeUInt16BE(1, 4);        // one question
+    const msg = Buffer.concat([header, qname, Buffer.from([0x00, 0x01, 0x00, 0x01])]);   // A, IN
+    const len = Buffer.alloc(2);
+    len.writeUInt16BE(msg.length, 0);
+    return Buffer.concat([len, msg]);
+}
+
+function skipName(buf, off) {
+    for (let guard = 0; guard < 128; guard++) {
+        if (off >= buf.length) return -1;
+        const len = buf[off];
+        if (len === 0) return off + 1;
+        if ((len & 0xc0) === 0xc0) return off + 2;
+        off += 1 + len;
+    }
+    return -1;
+}
+
+/** The A records in an answer to OUR question — the id and the response bit are checked. */
+function parseAnswer(msg, id) {
+    if (msg.length < 12 || msg.readUInt16BE(0) !== id) throw new Error('dns: not our answer');
+    const flags = msg.readUInt16BE(2);
+    if (!(flags & 0x8000)) throw new Error('dns: not a response');
+    if ((flags & 0x000f) !== 0) throw new Error(`dns: rcode ${flags & 0x000f}`);
+    const qd = msg.readUInt16BE(4);
+    const an = msg.readUInt16BE(6);
+    let off = 12;
+    for (let i = 0; i < qd; i++) { off = skipName(msg, off); if (off < 0) throw new Error('dns: bad question'); off += 4; }
+    const ips = [];
+    for (let i = 0; i < an && off > 0 && off + 10 <= msg.length; i++) {
+        off = skipName(msg, off);
+        if (off < 0 || off + 10 > msg.length) break;
+        const type = msg.readUInt16BE(off);
+        const rdlen = msg.readUInt16BE(off + 8);
+        const rd = off + 10;
+        if (type === 1 && rdlen === 4 && rd + 4 <= msg.length) ips.push(`${msg[rd]}.${msg[rd + 1]}.${msg[rd + 2]}.${msg[rd + 3]}`);
+        off = rd + rdlen;
+    }
+    return ips;
+}
+
+function tcpResolve(name, server, timeoutMs = 4000, port = 53) {
+    return new Promise((resolve, reject) => {
+        const net = require('net');
+        const id = require('crypto').randomInt(0, 65536);
+        const sock = net.connect(port, server);
+        let buf = Buffer.alloc(0);
+        let done = false;
+        const finish = (err, ips) => { if (done) return; done = true; sock.destroy(); if (err) reject(err); else resolve(ips); };
+        sock.setTimeout(timeoutMs, () => finish(new Error('dns: timeout')));
+        sock.on('connect', () => sock.write(dnsQuery(name, id)));
+        sock.on('data', (d) => {
+            buf = Buffer.concat([buf, d]);
+            if (buf.length < 2) return;
+            const len = buf.readUInt16BE(0);
+            if (buf.length < 2 + len) return;
+            try { finish(null, parseAnswer(buf.subarray(2, 2 + len), id)); } catch (e) { finish(e); }
+        });
+        sock.on('error', (e) => finish(e));
+        sock.on('close', () => finish(new Error('dns: closed')));
+    });
+}
+
+/** The machine could not resolve `name`: ask the public resolvers over TCP, then the cache. */
+async function resolveOwn(name, { servers = OWN_RESOLVERS, port = 53, timeoutMs = 4000 } = {}) {
+    if (!validName(name)) throw Object.assign(new Error(`bad name ${name}`), { code: 'ENOTFOUND' });
+    for (const server of servers) {
+        try {
+            const ips = await tcpResolve(name, server, timeoutMs, port);
+            if (ips.length) { remember(name, ips); return ips; }
+        } catch (e) { /* the next resolver */ }
+    }
+    const known = loadLkg()[name];
+    if (known && known.ips && known.ips.length) return known.ips;
+    throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${name}`), { code: 'ENOTFOUND', hostname: name });
+}
+
+/** dns.lookup's shape, over resolveOwn — for sockets undici opens. */
+function ownLookup(hostname, options, cb) {
+    if (typeof options === 'function') { cb = options; options = {}; }
+    resolveOwn(hostname).then((ips) => {
+        if (options && options.all) cb(null, ips.map((address) => ({ address, family: 4 })));
+        else cb(null, ips[0], 4);
+    }, (e) => cb(e));
+}
+
+let ownAgent = null;
+function ownResolverAgent() {
+    if (ownAgent) return ownAgent;
+    try {
+        const { Agent } = require('undici');
+        ownAgent = new Agent({ connect: { lookup: ownLookup } });
+    } catch (e) { ownAgent = null; }
+    return ownAgent;
+}
+
+const isDnsFailure = (err) => {
+    const s = `${(err && err.message) || ''} ${(err && err.cause && (err.cause.code || err.cause.message)) || ''}`;
+    return /ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(s);
+};
+
+/** Keep the last good address of a name that just worked — what resolveOwn falls back to. */
+function rememberAsync(host) {
+    if (!validName(host)) return;
+    const last = lkgRefreshedAt.get(host) || 0;
+    if (Date.now() - last < 10 * 60 * 1000) return;
+    lkgRefreshedAt.set(host, Date.now());
+    require('dns').lookup(host, { all: true, family: 4 }, (err, list) => {
+        if (!err && Array.isArray(list)) remember(host, list.map((a) => a.address));
+    });
+}
+
 // A failed direct attempt is remembered briefly so a burst of calls during setup doesn't
 // each pay the full timeout before falling back.
 let directFailedUntil = 0;
+// PER HOST. One global cooldown meant that one failing Worker switched the direct path off for
+// every other host for a minute: in the arena (2026-09-29) Gozargah's fetch failed and Nova's,
+// right after, never tried direct — «مسیر مستقیم بسته است» for a Worker that was fine.
+// `directFailedUntil` stays as the latest of them, for isUsingFallback() only.
+const directFailedByHost = new Map();
 const DIRECT_COOLDOWN_MS = 60 * 1000;
 
 function proxied(url) {
@@ -175,7 +341,9 @@ function isNetworkFailure(err) {
  * Extra option `fallbackOnStatus: [403, 451]` — see BLOCKED-BY-STATUS below.
  */
 async function gtFetch(url, options = {}) {
-    const useProxyFirst = Date.now() < directFailedUntil;
+    let hostKey = '';
+    try { hostKey = new URL(url).hostname.toLowerCase(); } catch (e) { hostKey = ''; }
+    const useProxyFirst = Date.now() < (directFailedByHost.get(hostKey) || 0);
 
     // BLOCKED BY STATUS, not by silence.
     //
@@ -219,6 +387,8 @@ async function gtFetch(url, options = {}) {
         return { ...rest, signal };
     };
 
+    let host = '';
+    try { host = new URL(url).hostname; } catch (e) { /* the fetch below says what is wrong */ }
     if (!useProxyFirst) {
         try {
             const res = await fetch(url, attemptOptions());
@@ -228,12 +398,30 @@ async function gtFetch(url, options = {}) {
                 // GitHub and Cloudflare calls onto the third-party proxy for a minute.
                 blockedRes = res;
             } else {
-                directFailedUntil = 0;
+                directFailedByHost.delete(hostKey);
+                rememberAsync(host);
                 return res;
             }
         } catch (e) {
             if (!isNetworkFailure(e)) throw e;
+            // The machine could not RESOLVE the name — the host itself may be perfectly
+            // reachable. Same direct path, with this app answering the lookup itself (WHEN THIS
+            // MACHINE CANNOT LOOK A NAME UP), before any proxy is considered.
+            const own = isDnsFailure(e) ? ownResolverAgent() : null;
+            if (own) {
+                try {
+                    const res = await fetch(url, { ...attemptOptions(), dispatcher: own });
+                    if (!isBlocked(res)) {
+                        try { Object.defineProperty(res, 'viaOwnResolver', { value: true, enumerable: false }); } catch (e2) {}
+                        return res;
+                    }
+                    blockedRes = res;
+                } catch (e2) {
+                    if (!isNetworkFailure(e2)) throw e2;
+                }
+            }
             directFailedUntil = Date.now() + DIRECT_COOLDOWN_MS;
+            directFailedByHost.set(hostKey, directFailedUntil);
         }
     }
 
@@ -275,6 +463,24 @@ async function gtFetch(url, options = {}) {
         }
     }
 
+    // Direct was skipped only because it failed a moment ago — and nothing else answered. The
+    // cooldown is to try the alternatives FIRST, never to skip the one path that exists: a retry
+    // after a single timeout (a cold Worker, measured on Gozargah 2026-09-29) otherwise failed at
+    // once with «direct closed» and never reached the Worker that had woken up meanwhile.
+    if (useProxyFirst) {
+        try {
+            const res = await fetch(url, attemptOptions());
+            if (!isBlocked(res)) {
+                directFailedByHost.delete(hostKey);
+                discard(blockedRes);
+                return res;
+            }
+            blockedRes = blockedRes || res;
+        } catch (e) {
+            if (!isNetworkFailure(e)) throw e;
+        }
+    }
+
     try {
         const res = await fetch(proxied(url), attemptOptions());
         if (isEdgeProxyFailure(res)) {
@@ -310,4 +516,8 @@ function isUsingFallback() {
     return Date.now() < directFailedUntil;
 }
 
-module.exports = { gtFetch, isUsingFallback, VERCEL_PROXY };
+module.exports = {
+    gtFetch, isUsingFallback, VERCEL_PROXY,
+    // the app's own resolver (WHEN THIS MACHINE CANNOT LOOK A NAME UP) — exported for testing
+    resolveOwn, tcpResolve, dnsQuery, parseAnswer, remember, LKG_FILE,
+};

@@ -69,6 +69,7 @@ connection works and the anti-filter profile simply does not exist.
 | `core/gst.exe` | Google Script tunnel client — Rust, in `gst-src/` | Built here; see [GST-PLAN.md](GST-PLAN.md) | MLMVPN |
 | `core/sni-spoofer/` | SNI engine + `WinDivert64.dll` / `.sys` | [basil00/WinDivert](https://github.com/basil00/WinDivert) | LGPL-3.0 / GPL-3.0 |
 | `core/vpngate_servers.csv` | Seed list for the Gateway panel | [vpngate.net](https://www.vpngate.net/) — refreshed at runtime | — |
+| `core/softether/` | SoftEther VPN Client 4.44 build 9807: `vpnclient_x64.exe`, `vpncmd_x64.exe`, `vpnclient.exe`, `vpncmd.exe`, `hamcore.se2`, `lang.config` (just `en`), `LICENSE.txt`. The Gateway panel installs it as the machine's client service on the first connect when no SoftEther is present (`gateway-manager.js › provisionClient`) | Copied from an official [SoftEther VPN Client](https://www.softether-download.com/) install (binaries signed by SoftEther Corporation) | Apache-2.0 |
 
 ### Written by the application, not by you
 

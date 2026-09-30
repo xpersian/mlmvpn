@@ -41,16 +41,40 @@ t('BPB prefix: an unterminated object gives null',
     try { await workers.codeFor(catalog.BY_ID.bpb, 'const nothing = 1;'); } catch (e) { refused = /تنظیمات/.test(e.message); }
     t('BPB update refuses a panel whose settings cannot be read', refused);
 
-    // and the whole assembly: prefix carried, body replaced.
+    // and the whole assembly: prefix carried, body replaced — by the BUNDLED copy while nothing has
+    // been read from the developer's GitHub…
+    const wl = require('../../store/worker-live');
+    const wlPeek = wl.peek;
+    wl.peek = () => null;
     const built = await workers.codeFor(catalog.BY_ID.bpb, appStyle);
     const bundled = fs.readFileSync(catalog.appFile(catalog.BY_ID.bpb.bundled.file), 'utf8');
     t('BPB update carries the deployed prefix', built.startsWith(workers.bpbPrefix(appStyle)));
     t('BPB update body is exactly the version being installed', workers.stripBpbPrefix(built) === bundled);
+    // …and by the DEVELOPER's copy once it has been read — at the same version number too: the user
+    // asked for every panel to come straight from its developer's GitHub (2026-10-01).
+    const devCode = 'export default { async fetch(){ return new Response("the developer\'s own build") } };';
+    wl.peek = (id) => (id === 'bpb' ? { code: devCode, version: catalog.BY_ID.bpb.bundled.version, repo: 'bia-pain-bache/BPB-Worker-Panel', ref: 'v' + catalog.BY_ID.bpb.bundled.version } : null);
+    const fromDev = await workers.codeFor(catalog.BY_ID.bpb, appStyle);
+    t('at the bundled version number, the developer\'s copy is what gets installed',
+        workers.target(catalog.BY_ID.bpb).from === 'live' && workers.stripBpbPrefix(fromDev) === devCode
+        && fromDev.startsWith(workers.bpbPrefix(appStyle)));
+    wl.peek = wlPeek;
 
     // ── what the store will and will not offer ───────────────────────────────
     const zeus = catalog.BY_ID.zeus;
     t('an older Zeus is an update', workers.compareToTarget(zeus, '1.11.8') === -1);
+    // With nothing read from the developer yet, the pin is the target…
+    const live = require('../../store/worker-live');
+    const realPeek = live.peek;
+    live.peek = () => null;
     t('the pinned Zeus is current', workers.compareToTarget(zeus, '2.2.0') === 0);
+    // …and once the developer's newer release has been read, that is (store/worker-live.js).
+    live.peek = (id) => (id === 'zeus' ? { code: 'x', version: '2.2.5', repo: 'panel-zeus/Z-E-U-S', ref: 'abc' } : null);
+    t('the developer\'s newer Zeus becomes the target', workers.compareToTarget(zeus, '2.2.0') === -1
+        && workers.target(zeus).from === 'live');
+    live.peek = (id) => (id === 'zeus' ? { code: 'x', version: '2.1.0', repo: 'panel-zeus/Z-E-U-S', ref: 'abc' } : null);
+    t('an OLDER upstream copy never replaces the pin', workers.target(zeus).from === 'pin');
+    live.peek = realPeek;
     t('a newer-than-pinned Zeus is not downgraded', workers.compareToTarget(zeus, '2.3.0') === 1);
     t('an unreadable version compares as unknown', workers.compareToTarget(zeus, 'who knows') === null);
 

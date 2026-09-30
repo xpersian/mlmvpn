@@ -66,6 +66,7 @@ OpenVPN، Lantern، Geph، ابزار WireGuard، WinDivert و فایل‌های
 | `core/gst.exe` | کلاینت تونل گوگل‌اسکریپت — Rust، در `gst-src/` | همین‌جا ساخته می‌شود؛ [GST-PLAN.md](GST-PLAN.md) | MLMVPN |
 | `core/sni-spoofer/` | موتور SNI + `WinDivert64.dll` / `.sys` | [basil00/WinDivert](https://github.com/basil00/WinDivert) | LGPL-3.0 / GPL-3.0 |
 | `core/vpngate_servers.csv` | فهرست اولیهٔ پنل گیت‌وی | [vpngate.net](https://www.vpngate.net/) — در زمان اجرا تازه می‌شود | — |
+| `core/softether/` | کلاینت SoftEther VPN نسخهٔ ۴.۴۴ بیلد ۹۸۰۷: `vpnclient_x64.exe`، `vpncmd_x64.exe`، `vpnclient.exe`، `vpncmd.exe`، `hamcore.se2`، `lang.config` (فقط `en`) و `LICENSE.txt`. اگر روی سیستم هیچ سافت‌اتری نباشد، پنل گیت‌وی در اولین اتصال همین را به‌عنوان سرویس کلاینت نصب می‌کند (`gateway-manager.js › provisionClient`) | کپی از نصب رسمی [SoftEther VPN Client](https://www.softether-download.com/) (باینری‌ها با امضای SoftEther Corporation) | Apache-2.0 |
 
 ### چیزهایی که خود برنامه می‌نویسد، نه شما
 

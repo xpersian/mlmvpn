@@ -397,13 +397,9 @@ function doCombineSelected() {
         
         base.configs.forEach(rawConfig => {
             cleanIps.forEach(ip => {
-                let modified = rawConfig;
-                modified = modified.replace(/@([a-zA-Z0-9.-]+):(\d+)/, "@" + ip + ":$2");
-                if (modified.includes('#')) {
-                    modified = modified + encodeURIComponent(" [" + ip + "]");
-                } else {
-                    modified = modified + "#" + ip;
-                }
+                // cf-uri.js: an IPv6 clean IP is written [v6]:port, and the original name is pinned
+                // into sni/host first — the old regex could neither see nor write an IPv6 address.
+                const modified = window.CfUri.rewrite(rawConfig, ip, null, true);
                 
                 newNodes.push({
                     config: modified,
@@ -1108,10 +1104,9 @@ window.submitRetestConfig = async function() {
     
     let modifiedConfigs = [];
     cleanIps.forEach(ip => {
-        let modified = configStr.replace(/@([a-zA-Z0-9.-]+):(\d+)/, "@" + ip + ":$2");
-        if (modified.includes('?')) {
-            modified = modified.replace(/sni=[^&#]*/, "sni=" + ip);
-        }
+        // cf-uri.js: IPv6-aware, and the Worker's name stays the SNI. This used to overwrite the
+        // SNI with the IP, which Cloudflare refuses for a Worker — every retest read «Timeout».
+        const modified = window.CfUri.rewrite(configStr, ip);
         modifiedConfigs.push({ id: ip, config: modified, ip: ip });
     });
     

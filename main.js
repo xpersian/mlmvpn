@@ -520,7 +520,7 @@ app.on('before-quit', () => {
     console.error('GitHub Tunnel kill-switch teardown on quit failed:', err);
   }
   try {
-    require('./github-tunnel/gt-engine').bailSync();
+    require('./github-tunnel/gt-dataplane').bailSync();
   } catch (err) {
     console.error('GitHub Tunnel engine teardown on quit failed:', err);
   }

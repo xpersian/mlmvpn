@@ -71,6 +71,11 @@
       var frames = Object.assign({}, persisted.frames || {});
       Object.keys(wins).forEach(function (id) {
         var w = wins[id];
+        // A window is created with `frame: null` and gets one when it is first placed. Reading
+        // through that null threw inside this timer, which lost the WHOLE save — every window's
+        // geometry, not just that one's — and raised an uncaught error with no visible cause.
+        // Whatever was remembered for it last time stays remembered.
+        if (!w || !w.frame) return;
         frames[id] = { x: w.frame.x, y: w.frame.y, w: w.frame.w, h: w.frame.h, z: !!w.zoomed };
       });
       var data = {
@@ -381,13 +386,25 @@
     if (app.run) { try { app.run(opts); } catch (e) { console.error('[wm] ' + id + ' failed:', e); } return null; }
 
     var w = wins[id];
+    // A window left HALF-BUILT by an earlier failure (opened before the desktop layer existed, a
+    // throw while placing it) used to stay registered with `frame: null` — and every later open of
+    // that app threw in applyFrame, so the window never opened again until a reload (found by
+    // opening every app in turn, 2026-09-30). It is rebuilt instead.
+    if (w && (!w.frame || !w.el || !w.el.parentNode)) {
+      try { if (w.el && w.el.parentNode) w.el.parentNode.removeChild(w.el); } catch (e) { /* gone */ }
+      delete wins[id];
+      w = null;
+    }
     if (!w) {
-      w = wins[id] = { id: id, app: app, el: create(app), state: {}, frame: null, zoomed: false, minimized: false, open: false, mounted: false };
-      layer.appendChild(w.el);
+      if (!layer) { console.error('[wm] open(' + id + ') before the desktop exists'); return null; }
+      // Built completely BEFORE it is registered, so a failure here leaves nothing behind.
+      var nw = { id: id, app: app, el: create(app), state: {}, frame: null, zoomed: false, minimized: false, open: false, mounted: false };
       var pf = persisted.frames && persisted.frames[id];
-      w.frame = clampFrame(pf ? { x: pf.x, y: pf.y, w: pf.w, h: pf.h } : defaultFrame(app), app);
-      w.zoomed = !!(pf && pf.z) && !app.noZoom;
-      w.el.classList.toggle('is-zoomed', w.zoomed);
+      nw.frame = clampFrame(pf ? { x: pf.x, y: pf.y, w: pf.w, h: pf.h } : defaultFrame(app), app);
+      nw.zoomed = !!(pf && pf.z) && !app.noZoom;
+      nw.el.classList.toggle('is-zoomed', nw.zoomed);
+      layer.appendChild(nw.el);
+      w = wins[id] = nw;
       wire(w);
     }
     if (!w.mounted) {

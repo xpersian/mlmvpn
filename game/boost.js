@@ -407,7 +407,9 @@ async function start({
     try {
         await tun.startTun(spec.socksPort, onLog, {
             mode: 'game',
-            processName: engine.processName,
+            // The spec's own when it names one: the GitHub Tunnel's engine is tailscaled in v1
+            // and gtcore in v2, and the exclusion must name the one actually listening.
+            processName: spec.processName || engine.processName,
             engineLabel: spec.fa,
             // Family, not variant — see proof() above.
             engineTag: family,
@@ -451,9 +453,12 @@ async function start({
  */
 async function stop(onLog = () => {}, drivers = null) {
     const was = active;
-    if (tun.isRunning()) {
+    // Only the game tunnel. With the GitHub Tunnel carrying the whole machine (`exclusive`),
+    // there is no game tunnel at all, and the one that is up belongs to that panel.
+    const cur = tun.currentTunnel();
+    if (cur && cur.mode === 'game') {
         onLog('[GAME] خاموش کردن شتاب بازی');
-        tun.stopTun(onLog);
+        await tun.stopTunAsync(onLog, 'game booster off');
         await tun.verifyTornDown(onLog);
     }
     active = null;

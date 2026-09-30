@@ -26,7 +26,73 @@ function load() {
     return {
         repo: stored.repo || null,          // { fullName, owner, name, defaultBranch }
         sessions: Array.isArray(stored.sessions) ? stored.sessions : [],
+        // Which data plane NEW sessions use: 'v2' (Xray through the user's Worker to Cloudflare
+        // quick tunnels) or 'v1' (Tailscale/WireGuard). Kept so v1 stays one switch away until
+        // v2 has replaced it everywhere; a session keeps the plane it was created with.
+        dataPlane: stored.dataPlane === 'v1' ? 'v1' : 'v2',
+        // «روشن کردن دیوارآتش ویندوز فقط هنگام اتصال» — the user's explicit yes to switching a
+        // firewall they had turned OFF on for the full tunnel's lifetime (gt-guard.js › WHEN
+        // WINDOWS FIREWALL IS OFF). Never assumed: off unless they said so.
+        firewallAutoEnable: stored.firewallAutoEnable === true,
+        // «تمدید خودکار بی‌وقفه»: while the tunnel is IN USE, the next session is made ready before
+        // this one ends and swapped in with one short reconnect; a runner lost mid-session is
+        // replaced the same way. On unless switched off — an idle tunnel is never renewed.
+        autoRenew: stored.autoRenew !== false,
+        // THE EXIT COUNTRY (P4, runner/exits.mjs), chosen by the user and brought up on every
+        // session's runner: '' = «حداکثر سرعت» (the runner's own address); a country code
+        // otherwise. The provider is '' (automatic: VPN Gate where it has the country, else
+        // Psiphon) unless the user picked one. `exitRules`: sites that leave by another country.
+        exit: normalizeExitPrefs(stored.exit),
     };
+}
+
+/** Only what can be acted on survives a read: codes, a known provider, plain domain names. */
+function normalizeExitPrefs(x) {
+    const cc = (v) => (typeof v === 'string' && /^[A-Z]{2}$/.test(v.toUpperCase()) ? v.toUpperCase() : '');
+    const prov = (v) => (v === 'vpngate' || v === 'psiphon' ? v : '');
+    const DOMAIN = /^(?=.{3,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+    const src = x && typeof x === 'object' ? x : {};
+    const rules = [];
+    for (const r of Array.isArray(src.rules) ? src.rules : []) {
+        const country = cc(r && r.country);
+        const domains = [...new Set((r && Array.isArray(r.domains) ? r.domains : [])
+            .map((d) => String(d).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^\*\./, '').replace(/^www\./, ''))
+            .filter((d) => DOMAIN.test(d)))].slice(0, 200);
+        if (country && domains.length) rules.push({ country, provider: prov(r.provider), domains });
+    }
+    return { country: cc(src.country), provider: prov(src.provider), rules: rules.slice(0, 5) };
+}
+
+function getExitPrefs() { return load().exit; }
+function setExitPrefs(patch = {}) {
+    const cfg = load();
+    cfg.exit = normalizeExitPrefs({ ...cfg.exit, ...patch });
+    save(cfg);
+    return cfg.exit;
+}
+
+function getAutoRenew() { return load().autoRenew; }
+function setAutoRenew(v) {
+    const cfg = load();
+    cfg.autoRenew = v !== false;
+    save(cfg);
+    return cfg.autoRenew;
+}
+
+function getFirewallAutoEnable() { return load().firewallAutoEnable; }
+function setFirewallAutoEnable(v) {
+    const cfg = load();
+    cfg.firewallAutoEnable = v === true;
+    save(cfg);
+    return cfg.firewallAutoEnable;
+}
+
+function getDataPlane() { return load().dataPlane; }
+function setDataPlane(v) {
+    const cfg = load();
+    cfg.dataPlane = v === 'v1' ? 'v1' : 'v2';
+    save(cfg);
+    return cfg.dataPlane;
 }
 
 function save(cfg) {
@@ -72,6 +138,8 @@ function addSession(fields = {}) {
         accountId: fields.accountId || '',
         accountLogin: fields.accountLogin || '',
         status: fields.status || 'SETTING_UP',
+        // Sessions from before v2 have no field and are v1 by definition.
+        dataPlane: fields.dataPlane === 'v2' ? 'v2' : 'v1',
         createdAt: Date.now(),
         expiresAt: null,
         tailscaleIp: '',
@@ -146,6 +214,8 @@ function resetAll() {
         path.join(HOME_DIR, 'github-tunnel-broker-deploy.json'),     // broker config + TS client
         path.join(HOME_DIR, 'github-tunnel-broker.json'),            // per-install signing secret
         path.join(HOME_DIR, 'gt-daemon.log'),
+        path.join(HOME_DIR, 'gt-core.log'),                           // v2 core's own log
+        path.join(HOME_DIR, 'gt-cleanip.json'),                       // v2 clean-IP winners per network
     ];
     for (const f of targets) {
         try { if (fs.existsSync(f)) { fs.rmSync(f, { force: true }); removed.push(path.basename(f)); } } catch (e) {}
@@ -159,7 +229,8 @@ function resetAll() {
 
 module.exports = {
     resetAll,
-    load, save, setRepo, getRepo,
+    load, save, setRepo, getRepo, getDataPlane, setDataPlane, getFirewallAutoEnable, setFirewallAutoEnable,
+    getAutoRenew, setAutoRenew, getExitPrefs, setExitPrefs, normalizeExitPrefs,
     addSession, updateSession, getSession, getActiveSession, getSessions, removeSession,
     SESSION_LIFETIME_MS, STORE_FILE,
 };

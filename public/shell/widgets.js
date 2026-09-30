@@ -166,37 +166,34 @@
   }
 
   // ── پنل‌های ابری ──────────────────────────────────────────────────────────
-  var LAMP_STATE = { '#81c995': 'is-ok', '#fde293': 'is-warn', '#f28b82': 'is-bad' };
+  // All nine panels of the Cloud window, from the answer the menu-bar lamps are drawn from
+  // (window.MVPanelLamps, app.js). This widget used to read three lamps' inline colours back as hex,
+  // which stopped matching anything once the colours became var(--mv-…) — every row lost its state.
+  var LAMP_WORD = { ok: 'کانفیگ دارد', warn: 'نصب شده', bad: 'نصب نشده' };
   function renderCloud() {
     var el = els.cloud;
     if (!el) return;
-    var panels = [['bpb', 'BPB'], ['edge', 'Edge'], ['zeus', 'Zeus']].map(function (p) {
-      var lamp = document.getElementById('light-' + p[0]);
-      var bg = lamp ? String(lamp.style.background || '').toLowerCase() : '';
-      var hex = (bg.match(/#[0-9a-f]{6}/) || [])[0] || rgbToHex(bg);
-      return { name: p[1], state: LAMP_STATE[hex] || '', tip: lamp ? (lamp.getAttribute('data-tooltip') || lamp.getAttribute('title') || '') : '' };
-    });
+    var panels = window.MVPanelLamps || [];
     var html = '<div class="mv-wg-head"><span>پنل‌های ابری</span></div>';
-    // With no Cloudflare account all three lamps say the same thing; say it once.
-    if (panels.every(function (p) { return !p.state && p.tip === panels[0].tip; })) {
-      html += '<p class="mv-wg-muted">' + esc(panels[0].tip || 'هنوز حساب کلودفلری وصل نشده است.') + '</p>';
+    if (!panels.length || panels.every(function (p) { return p.state === 'none'; })) {
+      // No Cloudflare account: every lamp says the same thing; say it once.
+      html += '<p class="mv-wg-muted">' + esc((panels[0] && panels[0].tip) || 'هنوز حساب کلودفلری وصل نشده است.') + '</p>';
     } else {
-      html += panels.map(function (p) {
-        return '<div class="mv-wg-cloud-row ' + p.state + '"><span class="mv-lampdot"></span><b class="mv-latin">' + p.name + '</b><span title="' + esc(p.tip) + '">' + esc(p.tip) + '</span></div>';
-      }).join('');
+      var on = panels.filter(function (p) { return p.state === 'ok' || p.state === 'warn'; }).length;
+      html += '<p class="mv-wg-muted">' + fa(on) + ' از ' + fa(panels.length) + ' پنل روی حساب‌هایتان نصب است</p>';
+      // Three columns of lamp + name (the full sentence is the row's tooltip), then what the colours mean.
+      html += '<div class="mv-wg-cloud-grid">' + panels.map(function (p) {
+        return '<div class="mv-wg-cloud-row is-' + p.state + '" title="' + esc(p.tip) + '"><span class="mv-lampdot"></span><b class="mv-latin">' + esc(p.name) + '</b></div>';
+      }).join('') + '</div>';
+      html += '<div class="mv-wg-cloud-legend">' + ['ok', 'warn', 'bad'].map(function (s) {
+        return '<span class="mv-wg-cloud-row is-' + s + '"><span class="mv-lampdot"></span>' + LAMP_WORD[s] + '</span>';
+      }).join('') + '</div>';
     }
     el.querySelector('.mv-wg-body').innerHTML = html + '<button type="button" class="mv-btn mv-btn--sm mv-wg-cta" data-open="cloud">باز کردن ابری</button>';
   }
-  function rgbToHex(s) {
-    var m = s.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (!m) return '';
-    return '#' + [m[1], m[2], m[3]].map(function (x) { return (+x).toString(16).padStart(2, '0'); }).join('');
-  }
+  function fa(n) { return String(n).replace(/[0-9]/g, function (d) { return '۰۱۲۳۴۵۶۷۸۹'[+d]; }); }
   function hookCloud() {
-    ['light-bpb', 'light-edge', 'light-zeus'].forEach(function (id) {
-      var l = document.getElementById(id);
-      if (l) new MutationObserver(renderCloud).observe(l, { attributes: true, attributeFilter: ['style', 'data-tooltip'] });
-    });
+    document.addEventListener('mv-panel-lamps', renderCloud);
   }
 
   // ── ساعت ─────────────────────────────────────────────────────────────────

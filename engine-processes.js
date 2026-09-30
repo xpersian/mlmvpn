@@ -41,6 +41,8 @@ const ENGINE_NAMES = [
     // «تونل گوگل‌اسکریپت» and «تونل گیت‌هاب»
     'gst',
     'tailscaled',
+    // «تونل گیت‌هاب» v2's private Xray copy (github-tunnel/gt-core.js)
+    'gtcore',
     'tailscale',
     // The four SOCKS-front engines
     'psiphon',

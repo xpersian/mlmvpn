@@ -329,4 +329,77 @@ async function download({ urls, sha256, size = 0, dest, onProgress, onRoute, sig
     throw err;
 }
 
-module.exports = { routes, enginePorts, systemProxy, fetchText, download, USER_AGENT };
+/**
+ * Download to `dest` when the publisher gives no digest but SIGNS the file — SoftEther's Windows
+ * client (store/authenticode.js says why that anchor is not a weaker one).
+ *
+ * `signedBy` is REQUIRED: the organisation whose Authenticode signature must be on the file. The
+ * bytes arrive exactly as in download() — same routes, same resume, same stall rules — into
+ * `dest + '.part'`, and nothing is renamed to `dest` until Windows has said the signature is Valid
+ * AND belongs to `signedBy`. A file that fails is deleted. So the promise download() makes still
+ * holds, with a different anchor: nothing downloaded here is ever returned unverified.
+ *
+ * Returns `{ file, bytes, route, url, sha256, signer }` — the digest measured here, for the record.
+ * Throws with `.code`: 'bad-signature' (the bytes arrived and are not the publisher's),
+ * 'unreachable', 'cancelled'.
+ */
+async function downloadSigned({ urls, signedBy, dest, onProgress, onRoute, signal, stallMs = 45000, headersMs = 30000,
+    verify = (f, who) => require('./authenticode').verify(f, who) }) {
+    if (!String(signedBy || '').trim()) throw new Error('بدون امضای مورد اعتماد هیچ دانلودی انجام نمی‌شود.');
+    if (fs.existsSync(dest)) {
+        // Not content-addressed like download()'s cache, so a copy on disk is CHECKED AGAIN, never
+        // trusted for having been checked once.
+        try {
+            const sig = await verify(dest, signedBy);
+            const prev = await hashExisting(dest);
+            if (!prev.failed) return { file: dest, bytes: prev.bytes, route: 'حافظهٔ محلی', url: '', sha256: prev.h.digest('hex'), signer: sig.subject };
+        } catch (e) { /* not good enough any more: fetch it again */ }
+        try { fs.unlinkSync(dest); } catch (e) { }
+    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const part = dest + '.part';
+    let lastErr = null;
+    let refused = null;
+
+    for (const url of urls || []) {
+        let urlDead = false;
+        for (const route of await routes()) {
+            if (signal && signal.aborted) { const c = new Error('لغو شد'); c.code = 'cancelled'; throw c; }
+            if (onRoute) onRoute(route.label, url);
+            try {
+                const out = await attempt(url, route, part, { size: 0, onProgress, signal, stallMs, headersMs });
+                let sig;
+                try {
+                    sig = await verify(part, signedBy);
+                } catch (e) {
+                    // The bytes are here and they are not the publisher's (or Windows could not say
+                    // they are). Not a route problem: another route would fetch the same file.
+                    refused = e;
+                    try { fs.unlinkSync(part); } catch (_) { }
+                    urlDead = true;
+                    break;
+                }
+                fs.renameSync(part, dest);
+                return { file: dest, bytes: out.bytes, route: route.label, url, sha256: out.sha256, signer: sig.subject };
+            } catch (e) {
+                if (e && e.cancelled) { const c = new Error('لغو شد'); c.code = 'cancelled'; throw c; }
+                lastErr = e;
+                if (e && e.url) { urlDead = true; break; }
+                // RouteError: keep the .part and let the next route resume it.
+            }
+        }
+        if (urlDead) { try { fs.unlinkSync(part); } catch (e) { } continue; }
+    }
+
+    try { fs.unlinkSync(part); } catch (e) { }
+    if (refused) {
+        const err = new Error(refused.message + ' فایل پاک شد و نصب نمی‌شود.');
+        err.code = 'bad-signature';
+        throw err;
+    }
+    const err = new Error(describeFailure(lastErr));
+    err.code = 'unreachable';
+    throw err;
+}
+
+module.exports = { routes, enginePorts, systemProxy, fetchText, download, downloadSigned, USER_AGENT };

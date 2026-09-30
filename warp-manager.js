@@ -174,9 +174,42 @@ function x25519() {
  * `client_id` becomes the three reserved bytes of every WireGuard header — Cloudflare routes on
  * them, and a packet without them is answered by nothing.
  */
+/**
+ * The WARP account API: direct first, then through the user's own Worker (warp-id-relay.js).
+ * Android 1.2.36: api.cloudflareclient.com is filtered in Iran even with a fragmented ClientHello,
+ * and trying a disguised front first cost ~50 s of timeouts. Whichever route answered is kept for
+ * the PATCH that follows, so both calls of one registration go the same way.
+ */
+let apiRoute = 'direct';
+async function warpApi(url, opts, signal) {
+    const tryRelay = async () => {
+        log('ثبت مستقیم روی این خط بسته است — از راه ورکر خودتان…');
+        let r = await require('./warp-id-relay').relayFetch(url, opts, (m) => log(m));
+        // 429 / error 1015: Cloudflare rate-limits registrations coming from Workers for ~3 minutes.
+        if (r.status === 429 || (r.status === 403 && /1015/.test(await r.clone().text().catch(() => '')))) {
+            log('کلادفلر ثبت از راه ورکر را موقتاً محدود کرده (محدودیت نرخ) — ۲۰ ثانیه صبر و یک بار دیگر…');
+            await new Promise((z) => setTimeout(z, 20000));
+            r = await require('./warp-id-relay').relayFetch(url, opts, (m) => log(m));
+            if (r.status === 429) throw new Error('کلادفلر ثبت هویت وارپ را موقتاً محدود کرده (محدودیت نرخ، خطای ۱۰۱۵) — چند دقیقه بعد دوباره امتحان کنید.');
+        }
+        apiRoute = 'worker';
+        return r;
+    };
+    if (apiRoute === 'worker') return tryRelay();
+    try {
+        const r = await fetch(url, Object.assign({}, opts, { signal: signal || AbortSignal.timeout(15000) }));
+        apiRoute = 'direct';
+        return r;
+    } catch (e) {
+        if (signal && signal.aborted) throw e;
+        return tryRelay();
+    }
+}
+
 async function register({ signal } = {}) {
     const kp = x25519();
-    const res = await fetch(API, {
+    apiRoute = 'direct';
+    const res = await warpApi(API, {
         method: 'POST',
         headers: API_HEADERS,
         body: JSON.stringify({
@@ -191,8 +224,7 @@ async function register({ signal } = {}) {
             tunnel_type: 'wireguard',
             locale: 'en_US',
         }),
-        signal: signal || AbortSignal.timeout(25000),
-    });
+    }, signal);
     if (!res.ok) throw new Error('ثبت‌نام کلادفلر ناموفق بود (HTTP ' + res.status + ')');
     const j = await res.json();
     const peer = j.config && j.config.peers && j.config.peers[0];
@@ -205,12 +237,11 @@ async function register({ signal } = {}) {
     // response was read carefully enough to notice. Cloudflare's own client PATCHes the device
     // straight after registering, and so must we.
     if (j.warp_enabled !== true && j.id && j.token) {
-        const p = await fetch(API + '/' + encodeURIComponent(j.id), {
+        const p = await warpApi(API + '/' + encodeURIComponent(j.id), {
             method: 'PATCH',
             headers: Object.assign({ Authorization: 'Bearer ' + j.token }, API_HEADERS),
             body: JSON.stringify({ warp_enabled: true }),
-            signal: signal || AbortSignal.timeout(25000),
-        }).catch(() => null);
+        }, signal).catch(() => null);
         const after = p && p.ok ? await p.json().catch(() => null) : null;
         if (!after || after.warp_enabled !== true) {
             throw new Error('کلادفلر وارپ را برای این حساب فعال نکرد — بدون آن تونل داده رد نمی‌کند.');
@@ -421,6 +452,10 @@ function transportEnv(id, socksPort, opts) {
 }
 
 async function spawnTransport(id, socksPort, opts) {
+    // v4 unless the user chose otherwise used to be the rule; now both whenever there is an IPv6
+    // route (cf-family.js › warpScanFamily — never v6 alone: WARP IPv4 worked on the network where
+    // Cloudflare's CDN IPv4 carried nothing).
+    try { opts = Object.assign({}, opts, { ip: await require('./cf-family').warpScanFamily(opts && opts.ip) }); } catch (e) { /* stored choice */ }
     await fsp.mkdir(DATA_DIR, { recursive: true });
     await fsp.writeFile(path.join(DATA_DIR, 'identity.toml'), identityToml(id));
     const exe = aetherPath();
@@ -497,9 +532,37 @@ async function sweep(id, { signal } = {}) {
  * real HTTPS request through the finished tunnel, never a handshake. Measured repeatedly today, an
  * endpoint can answer the handshake, report a validated data plane, serve SOCKS and carry nothing.
  */
+/**
+ * What the page should say under «وصل نشد» for a start that threw — the fix, not just the fault
+ * (Android 1.2.36 › ۵: the tunnels page keeps the failure and its remedy on screen).
+ */
+function failureHint(msg) {
+    const m = String(msg || '');
+    if (/محدودیت نرخ|1015|429/.test(m)) return 'کلادفلر ثبت هویت تازه را چند دقیقه محدود کرده است. چند دقیقه بعد دوباره «اتصال» را بزنید؛ هویتی که ساخته شد می‌ماند.';
+    if (/ثبت‌نام|پاسخ کلادفلر|فعال نکرد|registration|reg/i.test(m)) return 'ثبت هویت وارپ از این خط بسته است. در بخش ابری یک حساب کلادفلر اضافه کنید تا ثبت از راه ورکر خودتان انجام شود، یا «ماسک» را امتحان کنید.';
+    if (/aether.exe|موجود نیست/.test(m)) return 'فایل موتور نیست — برنامه را دوباره نصب کنید یا از «استور» هستهٔ وارپ را نصب کنید.';
+    return 'دوباره «اتصال» را بزنید؛ اگر باز نشد «ماسک» یا «ضد فیلتر SNI» را امتحان کنید.';
+}
+
+let startingSid = 0;
 async function start(opts = {}, onLog = null, onStage = null) {
+    try { return await startInner(opts, onLog, onStage); }
+    catch (e) {
+        // A start that THREW used to leave the stage at «starting» with the engine marked running:
+        // the page spun «در حال اتصال» forever and the reason lived only in a toast. The failure
+        // now stays on the page — with what to do about it — until the next connect.
+        if (startingSid === sessionId) {
+            await stop();
+            setStage('failed', String(e && e.message || e).slice(0, 200), { connected: false, hint: failureHint(e && e.message) });
+        }
+        throw e;
+    }
+}
+
+async function startInner(opts, onLog, onStage) {
     await stop();
     const sid = ++sessionId;
+    startingSid = sid;
     const mine = () => sessionId === sid;
     listeners = { onLog, onStage };
     logBuffer = [];
@@ -507,7 +570,7 @@ async function start(opts = {}, onLog = null, onStage = null) {
 
     // BEFORE the first setStage, so the very first status the page sees already says «running».
     active = true;
-    setStage('starting', 'راه‌اندازی موتور وارپ', { connected: false, server: null, socksPort });
+    setStage('starting', 'راه‌اندازی موتور وارپ', { connected: false, server: null, socksPort, hint: null });
     log('════════ وارپ (موتور مستقل) ════════');
 
     if (!isInstalled()) throw new Error('فایل core/aether.exe موجود نیست.');
@@ -564,7 +627,7 @@ async function pursue(child, socksPort, mine) {
     log('❌ در ' + Math.round(CONNECT_BUDGET_MS / 1000) + ' ثانیه هیچ اندپوینتی داده رد نکرد.');
     log('این شبکه وایرگارد به لبهٔ کلادفلر را بسته است — «ماسک» یا «ضد فیلتر SNI» را امتحان کنید.');
     await stop();
-    setStage('failed', 'اندپوینت سالمی پیدا نشد');
+    setStage('failed', 'اندپوینت سالمی پیدا نشد', { hint: 'این شبکه وایرگارد به لبهٔ کلادفلر را بسته است — «ماسک» یا «ضد فیلتر SNI» را امتحان کنید.' });
 }
 
 function settle(child, socksPort, colo) {

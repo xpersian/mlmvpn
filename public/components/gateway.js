@@ -357,6 +357,13 @@
           <span class="mv-side-tile" style="--tint:${x.tint}"><i class="${x.icon}"></i></span><span>${x.label}</span>
         </button>`).join('')}
       </div>
+      <div class="mv-side-group">
+        <button type="button" class="mv-side-item mv-side-go" data-gw-store="1" title="هستهٔ گیت‌وی در ام‌ال‌ام استور">
+          <span class="mv-side-tile" style="--tint:var(--mv-blue)"><i class="ph-fill ph-arrow-circle-down"></i></span>
+          <span>بررسی بروزرسانی</span>
+          <i class="ph-bold ph-arrow-up-left" aria-hidden="true"></i>
+        </button>
+      </div>
     </nav>
   </aside>
 
@@ -446,10 +453,13 @@
         const p = st.payload || {}, s = p.status || {};
         const base = { s, p };
 
-        if (!s.installed) {
+        // The engine ships with the app and installs itself on the first connect, so «not
+        // installed» is no longer something to show — only a build that lost core/softether has
+        // nothing to install from, and that is a packaging fault, not a program to go and find.
+        if (!s.installed && s.installable === false) {
             return Object.assign(base, { tone: 'off', act: '',
-                head: 'موتور سافت‌اتر روی این سیستم نیست',
-                line: 'این بخش موتور رسمی سافت‌اتر را راه می‌اندازد و خودش مدیریتش می‌کند. یک بار نصبش کنید و بعد از آن همه چیز از همین پنجره انجام می‌شود.' });
+                head: 'موتور گیت‌وی همراه این نسخه نیست',
+                line: 'این نسخه از برنامه ناقص نصب شده و فایل‌های موتور گیت‌وی را ندارد. برنامه را دوباره نصب کنید — لازم نیست چیز دیگری جداگانه نصب کنید.' });
         }
         if (s.connected) {
             const bits = [];
@@ -461,6 +471,13 @@
                 line: (s.host ? `همهٔ ترافیک سیستم از <code>${esc(shortName(s.host))}</code> رد می‌شود. ` : '') + bits.join(' · ') });
         }
         if (s.connecting) {
+            if (s.stage === 'installing') {
+                return Object.assign(base, { tone: 'busy', act: '',
+                    head: s.installKind === 'upgrade' ? 'به‌روزرسانی موتور گیت‌وی…' : 'آماده‌سازی موتور گیت‌وی…',
+                    line: s.installKind === 'upgrade'
+                        ? esc(s.detail || '') + ' — نسخه‌ای که از استور نصب کردید جای قبلی را می‌گیرد؛ چند ثانیه، بعد خودش وصل می‌شود.'
+                        : 'این سیستم تا حالا موتور گیت‌وی نداشته؛ نسخهٔ همراه برنامه نصب می‌شود. <b>فقط همین بار اول</b> است و کمتر از یک دقیقه طول می‌کشد — بعد خودش وصل می‌شود.' });
+            }
             return Object.assign(base, { tone: 'busy', act: 'off',
                 head: 'در حال اتصال…',
                 line: esc(s.detail || '') || 'نشست در حال برقراری… دکمهٔ بالا لغو می‌کند.' });
@@ -468,7 +485,7 @@
         if (s.error) {
             return Object.assign(base, { tone: 'off', act: st.selected ? 'on' : '',
                 head: 'وصل نشد',
-                line: esc(s.error) + ' — بخش «گزارش» خط‌به‌خط می‌گوید کجا ایستاد.' });
+                line: esc(s.error).replace(/\n+/g, '<br>') + ' — بخش «گزارش» خط‌به‌خط می‌گوید کجا ایستاد.' });
         }
         if (!st.selected) {
             return Object.assign(base, { tone: 'off', act: '',
@@ -529,7 +546,10 @@
         // control does, not what the engine is.
         const aria = v.act === 'off' ? (v.s.connecting ? 'لغو' : 'قطع') : 'اتصال';
         btn.setAttribute('aria-label', aria);
-        btn.title = v.act ? aria : (!v.s.installed ? 'موتور سافت‌اتر نصب نیست' : 'اول یک سرور انتخاب کنید');
+        btn.title = v.act ? aria
+            : (!v.s.installed && v.s.installable === false) ? 'موتور گیت‌وی همراه این نسخه نیست'
+                : v.s.stage === 'installing' ? 'در حال آماده‌سازی موتور'
+                    : 'اول یک سرور انتخاب کنید';
         const glyph = (v.tone === 'busy' || st.busy) ? 'mv-spin-ring'
             : v.tone === 'on' ? 'ph-fill ph-power' : 'ph-bold ph-power';
         const gl = q('glyph');
@@ -598,12 +618,12 @@
             <i class="ph-fill ph-database"${stale ? ' style="color:var(--mv-orange)"' : ''}></i>
             <span class="mv-eng-pick-text">
               <b>${fa(st.mine.length)} سرور در فهرست شما، و ${fa(st.archive.length)} سرور در آرشیو</b>
-              <small>${p.fetchedAt ? 'آخرین به‌روزرسانی ' + esc(ago(p.fetchedAt)) : (p.source === 'bundled' ? 'فهرست همراه برنامه' : 'هنوز به‌روزرسانی نشده')}</small>
+              <small>${p.fetchedAt ? 'آخرین به‌روزرسانی ' + esc(ago(p.fetchedAt)) : (p.source === 'bundled' ? 'فهرست همراه برنامه' + (p.at ? '، گرفته‌شده ' + esc(ago(p.at)) : '') : 'هنوز به‌روزرسانی نشده')}</small>
             </span>
           </div>
         </div>
         <div class="mv-eng-card2-foot">${!p.canRefresh
-            ? 'سایت گیت‌وی از ایران همیشه باز نیست. <b>برای به‌روزرسانی، اول یکی از تونل‌های برنامه را روشن کنید</b> — بعد این دکمه فهرست را از داخل همان تونل می‌گیرد.'
+            ? 'سایت گیت‌وی از ایران همیشه باز نیست. <b>برای به‌روزرسانی، یک حساب کلادفلر در بخش ابری اضافه کنید</b> (فهرست از راه ورکر خودتان گرفته می‌شود) <b>یا یکی از تونل‌های برنامه را روشن کنید</b>.'
             : stale
                 ? 'فهرست شما کهنه است. VPN Gate سرورهایش را مدام عوض می‌کند، پس بیشتر این‌ها دیگر جواب نمی‌دهند.'
                 : 'هر به‌روزرسانی فهرست را <b>بزرگ‌تر</b> می‌کند، نه اینکه جایش را بگیرد — سرورهای قدیمی در «آرشیو» می‌مانند و هر وقت خواستید به فهرستتان برمی‌گردند.'}</div>
@@ -766,7 +786,7 @@
           <button type="button" class="gw-chip${st.scope === 'archive' ? ' is-on' : ''}" data-gw-scope="archive">آرشیو · ${fa(st.archive.length)}</button>
         </div>
         <div class="gw-tb">
-          <button type="button" data-gw-act="refresh" ${busy ? 'disabled' : ''} title="${p.canRefresh ? 'گرفتن فهرست تازه' : 'اول یکی از تونل‌های برنامه را روشن کنید'}">
+          <button type="button" data-gw-act="refresh" ${busy ? 'disabled' : ''} title="${p.canRefresh ? 'گرفتن فهرست تازه' : 'اول یک حساب کلادفلر اضافه کنید یا یکی از تونل‌های برنامه را روشن کنید'}">
             <i class="${st.busy ? 'mv-spin-ring' : 'ph-bold ph-arrows-clockwise'}"></i>به‌روز</button>
           ${sw ? `<button type="button" data-gw-act="stop" class="is-stop"><i class="ph-bold ph-stop-circle"></i>توقف تست</button>`
             : `<button type="button" data-gw-act="ping" ${busy || !rows.length ? 'disabled' : ''}><i class="ph-bold ph-gauge"></i>پینگ</button>
@@ -1088,8 +1108,8 @@
         const sw = sweep();
         const word = sw ? `${sw.kind === 'probe' ? 'تست واقعی' : 'پینگ'} — ${fa(sw.done)} از ${fa(sw.total)}`
             : s.connected ? 'وصل — تونل کامل سیستم'
-                : s.connecting ? 'در حال برقراری نشست'
-                    : !s.installed ? 'موتور سافت‌اتر نصب نیست'
+                : s.connecting ? (s.stage === 'installing' ? 'آماده‌سازی موتور — فقط بار اول' : 'در حال برقراری نشست')
+                    : (!s.installed && s.installable === false) ? 'موتور گیت‌وی همراه این نسخه نیست'
                         : st.selected ? 'آمادهٔ اتصال' : 'سروری انتخاب نشده';
         const sel = selectedRow();
         host.innerHTML = `
@@ -1469,6 +1489,14 @@
         $('gw-wrap').querySelectorAll('.mv-side-item[data-gw-sec]').forEach((b) => {
             b.onclick = () => gwGoSec(b.getAttribute('data-gw-sec'));
         });
+        // The engine behind this window is one item in the store («هستهٔ گیت‌وی MLM»), which is
+        // where its version, what SoftEther has published, and the install button live — the same
+        // arrangement the warp engines' pages use.
+        const storeBtn = $('gw-wrap').querySelector('[data-gw-store]');
+        if (storeBtn) storeBtn.onclick = () => {
+            if (typeof window.storeOpenItem === 'function') window.storeOpenItem('core|softether');
+            else if (window.MV && MV.wm) MV.wm.open('store');
+        };
         $('gw-back').onclick = goBack;
         gwGoSec('connect');
         refresh();

@@ -101,8 +101,20 @@ function tcpTest(ip, port, timeout) {
       }
     });
     
-    socket.connect({ port, host: ip, localAddress: getPhysicalIpCached() || undefined });
+    socket.connect({ port, host: String(ip).replace(/^\[|\]$/g, ''), localAddress: localAddressFor(ip) });
   });
+}
+
+/**
+ * The physical adapter's address OF THE TARGET'S FAMILY. Binding an IPv4 local address to an IPv6
+ * connect fails outright (EINVAL), and since the filtering of 2026-09-28 the scanner also walks
+ * Cloudflare's IPv6 edge (scan-scout.js), so the family has to match.
+ */
+function localAddressFor(ip) {
+  if (String(ip).includes(':')) {
+    try { return require('./cf-family').globalIpv6() || undefined; } catch (e) { return undefined; }
+  }
+  return getPhysicalIpCached() || undefined;
 }
 
 /** Ø§Ø¬Ø±Ø§ÛŒ ÛŒÚ© Ø¯Ø±Ø®ÙˆØ§Ø³Øª HTTP/HTTPS ÙˆØ§Ù‚Ø¹ÛŒ Ùˆ Ø§Ù†Ø¯Ø§Ø²Ù‡â€ŒÚ¯ÛŒØ±ÛŒ Ø²Ù…Ø§Ù† Ù¾Ø§Ø³Ø® */
@@ -612,5 +624,5 @@ async function advancedScanIp(ip, port, provider, timeout = 5000) {
     };
 }
 
-module.exports = { scanIp, runScanPool, checkIsp, advancedScanIp };
+module.exports = { scanIp, runScanPool, checkIsp, advancedScanIp, getPhysicalIpCached, localAddressFor };
 

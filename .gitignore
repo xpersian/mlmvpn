@@ -94,3 +94,7 @@ desktop.ini
 *.swp
 *~
 .release-notes-*.md
+
+# The Android-to-Windows handoff notes: a working document for the developer's own sessions, full
+# of this machine's paths and the names of the developer's own Cloudflare accounts. Not docs.
+docs/ANDROID-1.2.36-TO-WINDOWS.fa.md

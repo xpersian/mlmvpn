@@ -796,6 +796,16 @@ const NO_APP_ROUTING = { rules: [], final: null, mode: 'all', count: 0 };
  *   the Google Script Tunnel passes gst.exe.
  * @param options.engineLabel  name used in the Persian log lines.
  */
+/**
+ * The `route_exclude_address` list, well-formed IPv4/IPv6 prefixes only. It becomes
+ * routing-table entries, and a malformed one would be either a sing-box load error (no tunnel)
+ * or a much wider hole than intended.
+ */
+function routeExcludes(list) {
+    return (Array.isArray(list) ? list : []).filter((c) =>
+        typeof c === 'string' && (/^\d{1,3}(\.\d{1,3}){3}\/(3[0-2]|[12]?\d)$/.test(c) || /^[0-9a-f:]+\/(12[0-8]|1[01]\d|\d{1,2})$/i.test(c)));
+}
+
 function buildTunConfig(socksPort, options = {}) {
     const exeNames = processNames(options.processName, 'aether.exe');
     const logLevel = options.logLevel || 'warn';
@@ -813,6 +823,8 @@ function buildTunConfig(socksPort, options = {}) {
     ];
     // Hostnames the engine dials, for engines whose server is a name rather than an address.
     const uplinkDomains = (options.uplinkDomains || []).filter(d => typeof d === 'string' && d.trim());
+    // CIDRs kept out of the tunnel's routes entirely (see the tun inbound).
+    const routeExcludeAddress = routeExcludes(options.routeExcludeAddress);
 
     // Sites that go to the ENGINE rather than direct, named rather than addressed.
     //
@@ -1027,6 +1039,14 @@ function buildTunConfig(socksPort, options = {}) {
             // Blocks traffic that tries to escape the tunnel via another interface. This is
             // the difference between "mostly tunnelled" and "no leaks".
             strict_route: true,
+            // Addresses kept out of the ROUTES, not merely routed `direct` by a rule below. On
+            // Windows a `direct` rule means sing-box accepts the connection inside the tunnel and
+            // re-opens it from its own socket — which rebuilds the stream from scratch (an engine's
+            // split TLS ClientHello arrives re-merged) and makes a UDP flow leave from a socket
+            // other than the one that learned its NAT mapping (hole punching fails). Excluded here,
+            // the engine's packets to these addresses never enter the adapter at all. Emitted only
+            // when there is something to exclude: an empty list is not the same as none.
+            ...(routeExcludeAddress.length ? { route_exclude_address: routeExcludeAddress } : {}),
             // gvisor reimplements TCP in userspace: it needs no extra kernel privileges and
             // behaves the same on every machine, which is why it is the default here. It is also
             // the slower of the two — everything the tunnel carries is copied through a userspace
@@ -1276,6 +1296,9 @@ function buildGameTunConfig(socksPort, options = {}) {
     // Matched by address, so a process lookup Windows refuses cannot silently disable the
     // whole feature. Only /32s the caller actually learned — never a guess.
     const gameIpCidrs = toHostCidrs(gameIps);
+    // As in the full tunnel: the engine's own server kept out of the routes, so its connections
+    // are never re-opened from sing-box's socket (see buildTunConfig).
+    const routeExcludeAddress = routeExcludes(options.routeExcludeAddress);
 
     return {
         log: { level: options.logLevel || 'warn', timestamp: true },
@@ -1301,6 +1324,7 @@ function buildGameTunConfig(socksPort, options = {}) {
             // but here almost everything is SUPPOSED to escape it. Leaving it on fights the
             // direct outbound for no gain.
             strict_route: false,
+            ...(routeExcludeAddress.length ? { route_exclude_address: routeExcludeAddress } : {}),
             stack: options.stack || 'gvisor',
         }],
 
@@ -2110,12 +2134,63 @@ function currentTunnel() {
 async function rebuild(onLog) {
     const last = lastStartArgs;
     if (!last || !isRunning()) return false;
-    stopTun(onLog || last.onLog);
+    // The tunnel's own rebuild, on its own behalf: not a takeover, so its owner is not told.
+    stopTun(onLog || last.onLog, 'rebuild', { by: last.options && last.options.owner });
     await startTun(last.socksPort, onLog || last.onLog, last.options);
     return true;
 }
 
+// ── WHO OWNS THE SHARED TUNNEL ──────────────────────────────────────────────────
+//
+// One adapter, many features. Most of them start it and stop it and keep nothing hanging off it.
+// GitHub Tunnel v2 is different: its full tunnel rides this adapter AND a kill-switch, a DNS block
+// and an IPv6 block are built around it. If another feature simply took the adapter over — the
+// V2Ray switch, the game tab, the WARP switch — those guards would outlive the tunnel they were
+// for: a block-by-default firewall that now blocks the NEW owner's engine too, i.e. no internet,
+// while the GitHub panel still read «connected».
+//
+// So a feature can register as the owner when it starts the tunnel (`options.owner` plus
+// `options.onPreempted`). Anyone ELSE who stops or replaces the tunnel while it is registered
+// makes this module call the owner's hook first — and WAIT for it, so the guards are down before
+// the new owner's engine needs the network. Features that never register behave exactly as
+// before. The hook must not take locks its caller might hold (it runs inside their transition).
+//
+// The hook is told what comes NEXT when a new tunnel is the reason (`next`: its SOCKS port and
+// engine): the game booster can build its tunnel on the owner's own engine, and an owner that
+// stopped that engine on the way out would pull the floor from under its successor.
+let owner = null; // { id, onPreempted }
+const PREEMPT_TIMEOUT_MS = 15000;
+
+function currentOwner() { return owner ? owner.id : null; }
+
+function describeNext(socksPort, options) {
+    if (!options) return null;
+    return { socksPort, processNames: processNames(options.processName, 'aether.exe'), mode: options.mode || 'full', owner: options.owner || null };
+}
+
+async function preemptOwner(by, reason, next = null) {
+    if (!owner || owner.id === by) return;
+    const o = owner;
+    owner = null;
+    writeTunLog && writeTunLog(`preempt owner=${o.id} by=${by || 'other'} reason=${reason || '-'}`);
+    try {
+        await Promise.race([
+            Promise.resolve().then(() => o.onPreempted && o.onPreempted({ reason: reason || 'preempted', by: by || null, next })),
+            new Promise((r) => setTimeout(r, PREEMPT_TIMEOUT_MS)),
+        ]);
+    } catch (e) { /* the takeover goes ahead; the owner's hook is best effort */ }
+}
+
 async function startTun(socksPort, onLog, options = {}) {
+    // Someone else's REGISTERED tunnel is replaced, not silently kept: «already on» used to be
+    // the answer, and the caller then reported its own tunnel up while every byte went through
+    // the owner's engine.
+    // Not only while it runs: a registration outlives a sing-box that died on its own, and the
+    // guards hang off the registration — so they come down before this start needs the network.
+    if (owner && owner.id !== options.owner) {
+        await stopTunAsync(onLog, `replaced by ${options.owner || options.engineTag || 'another tunnel'}`,
+            { by: options.owner, next: describeNext(socksPort, options) });
+    }
     lastStartArgs = { socksPort, onLog, options };
     // Which engine owns this SOCKS port. Used for the exclusion rule (loop prevention)
     // and so the log lines name the engine the user actually turned on.
@@ -2291,6 +2366,7 @@ async function startTun(socksPort, onLog, options = {}) {
             uplinkCidrs: options.uplinkCidrs,
             uplinkIps: options.uplinkIps,
             uplinkDomains: options.uplinkDomains,
+            routeExcludeAddress: options.routeExcludeAddress,
             stack: useStack,
             logLevel: options.logLevel,
         })
@@ -2324,6 +2400,8 @@ async function startTun(socksPort, onLog, options = {}) {
             // somebody who just turned Tor on. It never reached the config, so it never happened.
             remoteDnsServer: options.remoteDnsServer,
             hijackEngineDns: options.hijackEngineDns,
+            // Copied like every other field here, or it never reaches the builder (see above).
+            routeExcludeAddress: options.routeExcludeAddress,
             logLevel: options.logLevel,
             appRouting,
             mtu: tunMtu,
@@ -2433,6 +2511,13 @@ async function startTun(socksPort, onLog, options = {}) {
             const wasRunning = tunRunning;
             tunRunning = false;
             tunProcess = null;
+            // A registered owner hears it at once: its guards were built around this process,
+            // and a watchdog that only looks every twenty seconds is twenty seconds of either no
+            // internet (kill switch on) or the real address (off).
+            if (wasRunning && owner && typeof owner.onExited === 'function') {
+                const o = owner;
+                setImmediate(() => { try { o.onExited({ code }); } catch (e) { /* the owner's own watchdog still looks */ } });
+            }
             if (wasRunning && code !== 0 && code !== null) {
                 // A crash here leaves the machine without a default route until Windows
                 // tears the adapter down. Say so plainly instead of going quiet.
@@ -2491,7 +2576,7 @@ async function startTun(socksPort, onLog, options = {}) {
         // is slower but works everywhere. One retry, then the failure is real.
         if (stackPick.fallback && chosenStack !== 'gvisor') {
             onLog(`[TUN] با پشته‌ی سریع بالا نیامد (${ready.reason}) — یک بار دیگر با gvisor…`);
-            stopTun(null);
+            stopTun(null, 'start failed', { by: options.owner });
             // The retry drops the counters: whatever stopped the first try, it must not be them.
             countersApi = null;
             fs.writeFileSync(config, JSON.stringify(dropConditionlessRules(buildConfig('gvisor'), onLog), null, 2));
@@ -2501,7 +2586,7 @@ async function startTun(socksPort, onLog, options = {}) {
         if (!ready.ok) {
             // Never leave a half-started engine behind: it may already hold the adapter and
             // the default route, which is the machine-offline state with no UI to fix it.
-            stopTun(null);
+            stopTun(null, 'start failed', { by: options.owner });
             throw new Error(
                 `تونل بالا نیامد: ${ready.reason}\n` +
                 'لاگ بالا علت دقیق را نشان می‌دهد (معمولاً نبودن دسترسی مدیر یا درگیری با یک VPN دیگر).'
@@ -2510,6 +2595,9 @@ async function startTun(socksPort, onLog, options = {}) {
         onLog('[TUN] با gvisor برقرار شد.');
     }
     onLog(`[TUN] ✅ آداپتور «${TUN_IFACE_NAME}» ساخته شد و مسیر پیش‌فرض روی آن است.`);
+    // Registered from the moment the tunnel is real (see WHO OWNS THE SHARED TUNNEL). A tunnel
+    // started without an owner clears any stale registration: nothing hangs off it.
+    owner = options.owner ? { id: options.owner, onPreempted: options.onPreempted, onExited: options.onExited } : null;
     // From here the tunnel is real, so start watching what it actually carries. Both of these
     // are passive: the sampler reads byte counters sing-box already keeps, and neither costs the
     // user's line a single packet.
@@ -2611,7 +2699,18 @@ function endDiagSession(reason) {
 // relying on for the thing that decides whether the user has internet.
 //
 // So: ask nicely first, force second, and verify third.
-function stopTun(onLog, reason) {
+function stopTun(onLog, reason, { by } = {}) {
+    // Synchronous, so the owner's hook cannot be awaited here: it is started and left to finish
+    // (before-quit also lands here, where each owner's own exit hooks do the same work anyway).
+    // A takeover that follows this — a new tunnel's pre-flight — retries three times, which
+    // covers the second or two the owner needs to lift its guards.
+    if (owner && owner.id !== by) {
+        const o = owner;
+        owner = null;
+        try { Promise.resolve(o.onPreempted && o.onPreempted({ reason: reason || 'preempted', by: by || null, next: null })).catch(() => {}); } catch (e) { /* best effort */ }
+    } else if (owner && owner.id === by) {
+        owner = null;
+    }
     closeTunLog();
     endDiagSession(reason);
     countersApi = null;
@@ -2654,7 +2753,12 @@ function stopTun(onLog, reason) {
  * every time the user disconnected: «بعد قطع کردن v2ray کل اپ فریز میشه». stopTun stays for
  * `before-quit`, which cannot wait for a promise; everything a click reaches uses this.
  */
-async function stopTunAsync(onLog, reason) {
+async function stopTunAsync(onLog, reason, { by, next = null } = {}) {
+    // Someone other than the registered owner is taking the tunnel down: the owner lifts
+    // whatever it hung off the adapter FIRST (see WHO OWNS THE SHARED TUNNEL). Its own stop
+    // just clears the registration.
+    if (owner && owner.id !== by) await preemptOwner(by, reason, next);
+    else if (owner && owner.id === by) owner = null;
     closeTunLog();
     endDiagSession(reason);
     countersApi = null;
@@ -2726,6 +2830,7 @@ Get-NetAdapter -Name '${TUN_IFACE_NAME}' | Disable-NetAdapter -Confirm:$false
 
 module.exports = {
     currentEngine,
+    currentOwner,       // the feature registered as the shared tunnel's owner, or null
     currentTunnel,      // what the live tunnel is made of — the speed report measures against it
     verifyTunCarriesTraffic, probeTunReachableByIp,
     socksCarriesUdp,
@@ -2758,4 +2863,7 @@ module.exports = {
     tunnelCarriesData, // exported for testing: this guard is what keeps the machine online
     PROBE_TARGETS,      // exported for testing: which addresses the pre-flight probe knocks on
     processNames,       // exported for testing: an engine can be two processes (tor + its transport)
+    routeExcludes,      // exported for testing: only well-formed prefixes become routes
+    // Testing only: register an owner without starting sing-box, to drive the hand-over rules.
+    _setOwnerForTests: (o) => { owner = o ? { id: o.id, onPreempted: o.onPreempted, onExited: o.onExited } : null; },
 };

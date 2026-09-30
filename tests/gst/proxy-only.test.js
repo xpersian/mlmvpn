@@ -36,7 +36,10 @@ const tunFile = require.resolve(path.join(ROOT, 'tun-manager.js'));
 const tunStub = {
     running: true,
     stopped: 0,
+    // Whose tunnel it is: the adapter is shared, and only a tunnel gst.exe carries is GST's leftover.
+    engine: 'gst.exe',
     isRunning() { return this.running; },
+    currentEngine() { return this.running ? this.engine : null; },
     stopTun() { this.stopped++; this.running = false; },
     checkPrerequisites() {},
     startTun() { throw new Error('startTun must never be reached: the full tunnel was removed'); },
@@ -79,6 +82,19 @@ t('the runtime exposes no way to turn a full tunnel on',
     await runtime.releaseAll();
     t('stopping the engine also releases a leftover adapter', tunStub.stopped === 1);
     t('…and clears the flag with it', store.getRuntime().tun === false);
+
+    // Somebody else's tunnel on the shared adapter — a V2Ray full tunnel, the GitHub Tunnel's —
+    // is not a GST leftover, and these clean-ups used to take it down.
+    for (const [label, run] of [['startup', () => runtime.healAfterCrash()], ['stop', () => runtime.releaseAll()]]) {
+        tunStub.running = true;
+        tunStub.stopped = 0;
+        tunStub.engine = 'gtcore.exe';
+        await run();
+        t(`${label}: another feature's tunnel is left alone`, tunStub.stopped === 0 && tunStub.running === true,
+            'stopTun called ' + tunStub.stopped + ' times');
+    }
+    tunStub.engine = 'gst.exe';
+    tunStub.running = false;
 
     const state = await runtime.getState();
     t('the state the panel reads offers exactly two modes',

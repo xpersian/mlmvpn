@@ -559,7 +559,12 @@ window.handleFileUpload = function (event) {
         const text = String(reader.result || '');
         // Accept anything that has addresses in it — one per line, comma separated, or a CSV
         // column — rather than demanding a particular file shape.
-        const found = text.match(/\b\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,2})?\b/g) || [];
+        // IPv6 too (with an optional /prefix): Cloudflare's IPv6 edge is often the one that works
+        // since the filtering of 2026-09-28.
+        const v4 = text.match(/\b\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,2})?\b/g) || [];
+        const v6 = (text.match(/(?:^|[\s,;\[])([0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{0,4}){2,7})(?:\/\d{1,3})?(?=$|[\s,;\]])/g) || [])
+            .map((m) => m.replace(/^[\s,;\[]/, '')).filter((m) => (m.match(/:/g) || []).length >= 2);
+        const found = [...v4, ...v6];
         const uniq = [...new Set(found)];
         if (!uniq.length) { toast('❌ در این فایل آی‌پی‌ای پیدا نشد'); return; }
         const ta = $('ip-textarea');
@@ -1795,79 +1800,128 @@ window.initGlobalTooltip = function() {
     });
 };
 
-window.updatePanelStatusLights = function() {
-    const lights = {
-        'bpb': document.getElementById('light-bpb'),
-        'edge': document.getElementById('light-edge'),
-        'zeus': document.getElementById('light-zeus')
-    };
-    if(!lights.bpb || !lights.edge || !lights.zeus) return;
+// ── the panel lamps in the menu bar: one per panel of the Cloud window ──────────────────────────
+//
+// There used to be three (BPB, Edge, Zeus) while the Cloud window had grown to nine panels, so six of
+// them had no lamp at all. The nine are in the Cloud window's own order. BPB, Edge and Zeus live in
+// the window's account records; the other six in cloud-panels.js's records on the server, summed
+// over every account by /api/cloud-panels/summary (a local read, no network).
+//
+//   green  = configs received from it     yellow = installed, no configs yet
+//   red    = not installed                gray   = no Cloudflare account at all
+//
+// `window.MVPanelLamps` is the same answer as data, for the desktop widget (shell/widgets.js), and
+// the `mv-panel-lamps` event says it changed.
+const PANEL_LAMPS = [
+    { code: 'BPB', name: 'BPB' }, { code: 'EDG', name: 'Edge' }, { code: 'ZEU', name: 'Zeus' },
+    { code: 'SPD', name: 'Spider' }, { code: 'NTR', name: 'Netra' }, { code: 'GZG', name: 'Gozargah' },
+    { code: 'NVA', name: 'Nova' }, { code: 'NHN', name: 'Nahan' }, { code: 'MLM', name: 'MLM' },
+];
+const LAMP_LOOK = {
+    ok: ['var(--mv-green)', '0 0 4px var(--mv-green)'],
+    warn: ['var(--mv-yellow)', '0 0 4px var(--mv-yellow)'],
+    bad: ['var(--mv-red)', '0 0 4px var(--mv-red)'],
+    none: ['var(--mv-fill-3)', '0 0 2px rgba(0,0,0,0.5)'],
+};
+let panelSummary = { at: 0, key: '', panels: {} };
 
+/** The six newer panels' install records, re-read at most every five seconds. */
+function refreshPanelSummary(accounts) {
+    const key = accounts.map(a => a.id).join(',');
+    if (panelSummary.busy || (panelSummary.key === key && Date.now() - panelSummary.at < 5000)) return;
+    panelSummary.busy = true;
+    fetch('/api/cloud-panels/summary?acc=' + encodeURIComponent(key))
+        .then(r => r.json())
+        .then(j => {
+            if (!j || !j.ok) return;
+            panelSummary = { at: Date.now(), key, panels: j.panels || {} };
+            window.updatePanelStatusLights();   // at once, not on the next tick
+        })
+        .catch(() => { /* the lamps keep what they last knew */ })
+        .finally(() => {
+            panelSummary.busy = false;
+            // Unanswered: wait the same five seconds before asking again.
+            if (panelSummary.key !== key) { panelSummary.key = key; panelSummary.at = Date.now(); }
+        });
+}
+
+window.updatePanelStatusLights = function() {
+    const box = document.getElementById('panel-status-lights');
+
+    // The app's store, not the browser's localStorage: that is only a mirror, and an empty one
+    // (a fresh profile) made these lamps say «no account» while the Cloud window had one.
     let accounts = [];
     try {
-        accounts = JSON.parse(localStorage.getItem('cf_accounts') || '[]');
+        accounts = JSON.parse((window.PersistentStorage || localStorage).getItem('cf_accounts') || '[]');
     } catch(e) {}
 
     let bases = [];
     try {
-        bases = JSON.parse(localStorage.getItem('cf_base_configs') || '[]');
+        bases = JSON.parse((window.PersistentStorage || localStorage).getItem('cf_base_configs') || '[]');
     } catch(e) {}
 
-    const panelNames = {
-        'bpb': 'bpb',
-        'edge': 'Edge',
-        'zeus': 'Zeus'
-    };
-
+    let lamps;
     if (accounts.length === 0) {
-        ['bpb', 'edge', 'zeus'].forEach(p => {
-            lights[p].style.background = 'var(--mv-fill-3)'; // Gray
-            lights[p].setAttribute('data-tooltip', 'شما هیچ اکانت کلادفلری متصل نکرده اید');
-            lights[p].style.boxShadow = '0 0 2px rgba(0,0,0,0.5)';
+        lamps = PANEL_LAMPS.map(p => ({ code: p.code, name: p.name, state: 'none', tip: 'شما هیچ اکانت کلادفلری متصل نکرده اید' }));
+    } else {
+        refreshPanelSummary(accounts);
+        const host = (u) => String(u || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        const groupOf = (code) => bases.some(b => b.metadata && b.metadata.panel === code);
+
+        // BPB, Edge, Zeus: the Cloud window's own account records.
+        const bpbConfigs = bases.some(b => (!b.metadata || (!b.metadata.zeusUsername && !b.metadata.edgeUuid && !b.metadata.panel)) && accounts.some(a => a.url && String(b.name || '').includes(host(a.url))));
+        const edgeConfigs = bases.some(b => (b.metadata && b.metadata.edgeUuid) || accounts.some(a => a.edgeUrl && String(b.name || '').includes(host(a.edgeUrl))));
+        const zeusUsers = accounts.reduce((sum, a) => sum + (a.zeusUserCount || 0), 0);
+        const zeusConfigs = zeusUsers > 0 || bases.some(b => b.metadata && b.metadata.zeusUsername);
+        const st = {
+            BPB: { deployed: accounts.some(a => !!a.url), configs: bpbConfigs },
+            EDG: { deployed: accounts.some(a => !!a.edgeUrl), configs: edgeConfigs },
+            ZEU: { deployed: accounts.some(a => !!a.zeusUrl), configs: zeusConfigs, users: zeusUsers },
+        };
+        // The other six: cloud-panels.js's records, plus any group of theirs already received.
+        PANEL_LAMPS.slice(3).forEach(p => {
+            const s = panelSummary.panels[p.code] || {};
+            st[p.code] = { deployed: (s.installed || 0) > 0, configs: (s.configs || 0) > 0 || groupOf(p.code), accounts: s.installed || 0 };
         });
-        return;
+
+        lamps = PANEL_LAMPS.map(p => {
+            const s = st[p.code];
+            if (s.configs && s.deployed) {
+                return { code: p.code, name: p.name, state: 'ok',
+                    tip: p.code === 'ZEU' && s.users > 0 ? `شما ${s.users} کاربر در پنل زئوس دارید` : `کانفیگ های پنل ${p.name} با موفقیت دریافت شدند` };
+            }
+            if (s.deployed) {
+                return { code: p.code, name: p.name, state: 'warn',
+                    tip: `پنل ${p.name} نصب شده و آماده ${p.code === 'ZEU' ? 'مدیریت کاربران' : p.code === 'SPD' ? 'ساختن کاربر' : 'دریافت کانفیگ'} است` };
+            }
+            return { code: p.code, name: p.name, state: 'bad', tip: `شما پنل ${p.name} را نصب نکرده‌اید` };
+        });
     }
 
-    // BPB checks
-    let bpbDeployed = accounts.some(a => !!a.url);
-    let bpbConfigs = bases.some(b => (!b.metadata || (!b.metadata.zeusUsername && !b.metadata.edgeUuid)) && accounts.some(a => a.url && b.name.includes(a.url.replace('https://',''))));
-    
-    // EDGE checks
-    let edgeDeployed = accounts.some(a => !!a.edgeUrl);
-    let edgeConfigs = bases.some(b => (b.metadata && b.metadata.edgeUuid) || accounts.some(a => a.edgeUrl && b.name.includes(a.edgeUrl.replace('https://',''))));
-
-    // ZEUS checks
-    let zeusDeployed = accounts.some(a => !!a.zeusUrl);
-    let totalZeusUsers = accounts.reduce((sum, a) => sum + (a.zeusUserCount || 0), 0);
-    // If we have zeusUserCount > 0, it's green. Or if we have exported configs for Zeus (fallback)
-    let zeusConfigs = totalZeusUsers > 0 || bases.some(b => b.metadata && b.metadata.zeusUsername);
-
-    const states = {
-        'bpb': { deployed: bpbDeployed, configs: bpbConfigs },
-        'edge': { deployed: edgeDeployed, configs: edgeConfigs },
-        'zeus': { deployed: zeusDeployed, configs: zeusConfigs, usersCount: totalZeusUsers }
-    };
-
-    ['bpb', 'edge', 'zeus'].forEach(p => {
-        let st = states[p];
-        if (st.configs) {
-            lights[p].style.background = 'var(--mv-green)'; // Green
-            if (p === 'zeus') {
-                lights[p].setAttribute('data-tooltip', st.usersCount > 0 ? `شما ${st.usersCount} کاربر در پنل زئوس دارید` : `کانفیگ های پنل زئوس با موفقیت دریافت شدند`);
-            } else {
-                lights[p].setAttribute('data-tooltip', `کانفیگ های پنل ${panelNames[p]} با موفقیت دریافت شدند`);
-            }
-            lights[p].style.boxShadow = '0 0 4px var(--mv-green)';
-        } else if (st.deployed) {
-            lights[p].style.background = 'var(--mv-yellow)'; // Yellow
-            lights[p].setAttribute('data-tooltip', `اکانت ${panelNames[p]} دیپلوی شده و آماده ${p === 'zeus' ? 'مدیریت کاربران' : 'دریافت کانفیگ'} است`);
-            lights[p].style.boxShadow = '0 0 4px var(--mv-yellow)';
-        } else {
-            lights[p].style.background = 'var(--mv-red)'; // Red
-            lights[p].setAttribute('data-tooltip', `شما پنل ${panelNames[p]} را دیپلوی نکردید`);
-            lights[p].style.boxShadow = '0 0 4px var(--mv-red)';
+    const changed = JSON.stringify(lamps) !== JSON.stringify(window.MVPanelLamps || null);
+    window.MVPanelLamps = lamps;
+    if (!box) return;
+    if (box.children.length !== lamps.length) {
+        box.innerHTML = lamps.map(() => '<div style="width: 10px; height: 10px; border-radius: 50%; transition: background 0.3s;"></div>').join('');
+        // Any lamp opens the Cloud window, where the panel itself is.
+        if (!box.dataset.wired) {
+            box.dataset.wired = '1';
+            const open = () => { if (window.MV && MV.wm) MV.wm.open('cloud'); };
+            box.addEventListener('click', open);
+            box.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
         }
+    }
+    lamps.forEach((l, i) => {
+        const el = box.children[i];
+        const look = LAMP_LOOK[l.state];
+        el.id = 'light-' + l.code.toLowerCase();
+        el.style.background = look[0];
+        el.style.boxShadow = look[1];
+        el.dataset.state = l.state;
+        const tip = l.name + ' — ' + l.tip;
+        if (el.getAttribute('data-tooltip') !== tip) el.setAttribute('data-tooltip', tip);
     });
+    if (changed) document.dispatchEvent(new CustomEvent('mv-panel-lamps', { detail: lamps }));
 };
 
 // ===== fragment+fingerprint (جایگزین SNI-Spoofing برای کانفیگ‌های کلودفلر) =====

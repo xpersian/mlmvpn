@@ -104,9 +104,39 @@ const READ_ONLY_API = {
       fronts: ov.liveSocksPorts().map((p) => ({ port: p, name: ov.viaName(p) })),
     });
   },
+  // «اوپن‌وی‌پی‌ان › پروفایل‌ها و حساب‌ها»: the saved profiles and accounts (never the profile text,
+  // never a password — openvpn-profiles.js strips both). list() seeds TunnelBear only on a machine
+  // that has never been seeded; this one has, so it is a pure read here.
+  '/api/openvpn/profiles': () => {
+    const p = require(path.join(ROOT_DIR, 'openvpn-profiles.js'));
+    return { ok: true, profiles: p.list(), accounts: p.accounts(), connectedId: null };
+  },
   // «ام‌ال‌ام استور»: reads the disk (each core's own version flag) and the last worker survey from
   // its cache. No network, nothing written — the same guarantee as every other entry here.
+  // «میدان کانفیگ»: the saved races (arena.js only reads its history file here — nothing runs).
+  '/api/arena/state': () => {
+    const arena = require(path.join(ROOT_DIR, 'arena.js'));
+    return { ok: true, state: arena.state, latest: arena.latest(), live: arena.score([]) };
+  },
+  '/api/arena/history': () => ({ ok: true, history: require(path.join(ROOT_DIR, 'arena.js')).history() }),
+  '/api/arena/account-patches': () => ({ ok: true, patches: [] }),
   '/api/store/catalog': () => require(path.join(ROOT_DIR, 'store-manager.js')).catalogRows(),
+  // The Cloud panels' install records (~/.mlmvpn/cloud-panels.json), for the menu-bar lamps and
+  // the Cloud window's rows. cloud-panels.js › status() is a single file read.
+  '/api/cloud-panels/summary': (req) => {
+    const cp = require(path.join(ROOT_DIR, 'cloud-panels.js'));
+    const q = new URL(req.url, 'http://x').searchParams;
+    const out = {};
+    for (const code of Object.keys(cp.PANELS)) out[code] = { installed: 0, configs: 0 };
+    for (const id of String(q.get('acc') || '').split(',').filter(Boolean)) {
+      for (const [code, s] of Object.entries(cp.status(id))) if (s.installed && out[code]) { out[code].installed++; out[code].configs += s.configs || 0; }
+    }
+    return { ok: true, panels: out };
+  },
+  '/api/cloud-panels/status': (req) => {
+    const cp = require(path.join(ROOT_DIR, 'cloud-panels.js'));
+    return { ok: true, panels: cp.PANELS, status: cp.status(new URL(req.url, 'http://x').searchParams.get('accId') || '') };
+  },
   '/api/store/jobs': () => ({ ok: true, jobs: require(path.join(ROOT_DIR, 'store-manager.js')).jobs.all() }),
   // «گف»: the country and exit lists, read from the caches the engine itself wrote. Both
   // functions fall back to disk when no client is running, so this spawns nothing, dials
@@ -185,7 +215,7 @@ const server = http.createServer((req, res) => {
 
   if (url.startsWith('/api/') && process.env.MV_PREVIEW_API && req.method === 'GET' && READ_ONLY_API[url]) {
     // A handler may be async (the store reads versions off the binaries themselves).
-    Promise.resolve().then(() => READ_ONLY_API[url]()).then(
+    Promise.resolve().then(() => READ_ONLY_API[url](req)).then(
       (v) => { res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(v)); },
       (e) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'UI preview: ' + e.message })); });
     return;

@@ -295,4 +295,5 @@ async function detectNat({ signal = null } = {}) {
     };
 }
 
-module.exports = { detectNat, parseMapped, addrKind, SERVERS };
+// probeAll: the GitHub Tunnel's leak test asks the same servers what a datagram looks like from outside.
+module.exports = { detectNat, parseMapped, addrKind, probeAll, SERVERS };

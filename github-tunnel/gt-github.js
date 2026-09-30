@@ -303,26 +303,34 @@ async function ensureRepo(token) {
 
 // ── workflow file (idempotent push — only writes when content differs) ─────────────
 
-async function ensureWorkflow(token, repoFullName, workflowYaml) {
+/**
+ * Put a file in the repo only if its content differs — so a template edit rolls out to every
+ * account on its next session, and an unchanged one costs a single GET.
+ */
+async function ensureFile(token, repoFullName, filePath, content, { what = 'file' } = {}) {
     requireToken(token);
-    const encoded = Buffer.from(workflowYaml, 'utf8').toString('base64');
+    const encoded = Buffer.from(content, 'utf8').toString('base64');
 
     let existingSha = null;
     try {
-        const existing = await gh(token, 'GET', `/repos/${repoFullName}/contents/${WORKFLOW_PATH}`);
+        const existing = await gh(token, 'GET', `/repos/${repoFullName}/contents/${filePath}`);
         existingSha = existing.sha;
         const currentContent = Buffer.from(existing.content, 'base64').toString('utf8');
-        if (currentContent === workflowYaml) return { changed: false };
+        if (currentContent === content) return { changed: false };
     } catch (e) {
         if (e.status !== 404) throw e;
     }
 
-    await gh(token, 'PUT', `/repos/${repoFullName}/contents/${WORKFLOW_PATH}`, {
-        message: existingSha ? 'MLMVPN: update tunnel workflow' : 'MLMVPN: add tunnel workflow',
+    await gh(token, 'PUT', `/repos/${repoFullName}/contents/${filePath}`, {
+        message: existingSha ? `MLMVPN: update ${what}` : `MLMVPN: add ${what}`,
         content: encoded,
         ...(existingSha ? { sha: existingSha } : {}),
     });
     return { changed: true };
+}
+
+async function ensureWorkflow(token, repoFullName, workflowYaml) {
+    return ensureFile(token, repoFullName, WORKFLOW_PATH, workflowYaml, { what: 'tunnel workflow' });
 }
 
 // ── per-session repo secret (short-lived Tailscale key never touches disk/UI) ──────
@@ -378,9 +386,10 @@ async function deleteRepoSecret(token, repoFullName, secretName) {
  * greater than the newest one that existed before I asked" identifies it exactly, using
  * only GitHub's own ordering and no clock at all.
  */
-async function dispatchWorkflow(token, repoFullName, ref, inputs) {
+async function dispatchWorkflow(token, repoFullName, ref, inputs, { workflowFile = WORKFLOW_FILENAME } = {}) {
     requireToken(token);
-    const listUrl = `/repos/${repoFullName}/actions/workflows/${WORKFLOW_FILENAME}/runs?event=workflow_dispatch&per_page=10`;
+    if (!/^[A-Za-z0-9._-]+\.ya?ml$/.test(workflowFile)) throw new Error('bad workflow file name');
+    const listUrl = `/repos/${repoFullName}/actions/workflows/${workflowFile}/runs?event=workflow_dispatch&per_page=10`;
 
     let highestBefore = 0;
     try {
@@ -392,7 +401,7 @@ async function dispatchWorkflow(token, repoFullName, ref, inputs) {
         if (e.status !== 404) throw e;
     }
 
-    await gh(token, 'POST', `/repos/${repoFullName}/actions/workflows/${WORKFLOW_FILENAME}/dispatches`, { ref, inputs });
+    await gh(token, 'POST', `/repos/${repoFullName}/actions/workflows/${workflowFile}/dispatches`, { ref, inputs });
 
     for (let attempt = 0; attempt < 12; attempt++) {
         await new Promise(r => setTimeout(r, 1500));
@@ -418,12 +427,15 @@ async function getRun(token, repoFullName, runId) {
  * describe tunnel sessions, and counting some unrelated workflow the user added to the
  * same repo would make it wrong in a direction nobody could explain.
  */
-async function listWorkflowRuns(token, repoFullName, { perPage = 100 } = {}) {
+async function listWorkflowRuns(token, repoFullName, { perPage = 100, allWorkflows = false } = {}) {
     requireToken(token);
     const per = Math.min(Math.max(Number(perPage) || 100, 1), 100);
     try {
-        const data = await gh(token, 'GET',
-            `/repos/${repoFullName}/actions/workflows/${WORKFLOW_FILENAME}/runs?per_page=${per}`);
+        // allWorkflows: every run in the repo — v1 (Windows), v2 (ubuntu) and anything else
+        // MLMVPN dispatched — each carrying its workflow `path`, so each can be priced right.
+        const data = await gh(token, 'GET', allWorkflows
+            ? `/repos/${repoFullName}/actions/runs?per_page=${per}`
+            : `/repos/${repoFullName}/actions/workflows/${WORKFLOW_FILENAME}/runs?per_page=${per}`);
         const runs = data.workflow_runs || [];
         return { runs, total: data.total_count || runs.length, truncated: (data.total_count || 0) > runs.length };
     } catch (e) {
@@ -506,7 +518,7 @@ async function getActionsBilling(token, login) {
 
 module.exports = {
     startLogin, status, cancelPending, claimPending, setSignInHandler, identify, hasBillingScope,
-    ensureRepo, ensureWorkflow, setRepoSecret, deleteRepoSecret, getActionsBilling,
+    ensureRepo, ensureWorkflow, ensureFile, setRepoSecret, deleteRepoSecret, getActionsBilling,
     dispatchWorkflow, getRun, cancelRun, listWorkflowRuns, getSessionData, deleteSessionFile, serverNow,
     REPO_NAME, WORKFLOW_FILENAME, WORKFLOW_PATH, CLIENT_ID, SCOPE,
 };

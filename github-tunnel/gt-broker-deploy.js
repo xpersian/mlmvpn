@@ -49,17 +49,30 @@ function save(s) {
 // Bumped whenever a deployed Worker gains a capability the app then relies on. 2 = the
 // Worker verifies request signatures; anything deployed before that accepts unsigned
 // requests from anyone who finds the URL, so the panel has to be able to say "redeploy".
-const BROKER_AUTH_VERSION = 2;
+// 3 = the v2 passthrough (/p/): GitHub Tunnel v2 reaches its quick tunnels through it,
+// because *.trycloudflare.com itself is blocked from Iran.
+// The Worker's 4 (THE STABLE SLOTS) is NOT required of everyone: only the stable tunnel uses it,
+// and gt-slots.setup redeploys the Worker itself, with the bindings the route needs.
+const BROKER_AUTH_VERSION = 3;
 
 function status() {
     const s = load();
+    const deployedVersion = Number(s.authVersion || 1);
+    const needsRedeploy = !!s.deployed && deployedVersion < BROKER_AUTH_VERSION;
     return {
         deployed: !!s.deployed,
-        // True for a relay deployed by a build that had no signature checking. It still
-        // works, which is exactly why it needs saying out loud: it is wide open.
-        needsRedeploy: !!s.deployed && Number(s.authVersion || 1) < BROKER_AUTH_VERSION,
+        // True for a relay deployed by a build that had no signature checking (it still works,
+        // which is exactly why it needs saying out loud: it is wide open), or by one that lacks
+        // the v2 passthrough — which is not a hole, just a missing route. The panel words the
+        // two differently; telling someone a secure relay is "open" is its own kind of wrong.
+        needsRedeploy,
+        redeployReason: !needsRedeploy ? '' : deployedVersion < 2 ? 'security' : 'feature',
         url: s.url || '',
         accountName: s.accountName || '',
+        // The Cloudflare account it runs on (the stable tunnels must live on the same one), and
+        // the stable-tunnel bindings it was last deployed with.
+        cfAccountId: s.cfAccountId || '',
+        slotsBound: Array.isArray(s.slotsBound) ? s.slotsBound : [],
         deployedAt: s.deployedAt || 0,
         customUrl: s.customUrl || '',
         effectiveUrl: getBrokerUrl(),
@@ -97,7 +110,11 @@ async function deployBroker({ email, token, accountName, tsClientId, tsClientSec
     const log = (m) => { try { onLog && onLog(m); } catch (e) {} };
 
     if (!token) throw new Error('حساب کلادفلر معتبر نیست.');
-    if (!tsClientId || !tsClientSecret || !tsTailnet) throw new Error('اطلاعات شبکه‌ی امن کامل نیست.');
+    // The Tailscale client is v1's (it mints keys at /mint). v2 needs only the signing secret
+    // and the passthrough, so the three are optional — but all three or none: a half-set is a
+    // /mint that fails for a reason nobody would guess.
+    const hasTs = !!(tsClientId || tsClientSecret || tsTailnet);
+    if (hasTs && !(tsClientId && tsClientSecret && tsTailnet)) throw new Error('اطلاعات شبکه‌ی امن کامل نیست.');
 
     log('در حال بررسی حساب کلادفلر…');
     const accResRaw = await fetch('https://api.cloudflare.com/client/v4/accounts', { headers: authHeaders(token, email) });
@@ -117,19 +134,30 @@ async function deployBroker({ email, token, accountName, tsClientId, tsClientSec
         throw new Error('فایل سرویس شبکه‌ی امن در این نسخه از برنامه پیدا نشد. لطفاً نسخه‌ی جدید برنامه را نصب کنید.');
     }
 
+    // Only onto the account the stable tunnels live on: a VPC binding reaches its own account's
+    // tunnels, and a Worker deployed on another account goes without them (its sessions then
+    // use quick tunnels only).
+    let slotBindings = [];
+    try { slotBindings = require('./gt-slots').workerBindings(cfAccountId); } catch (e) { slotBindings = []; }
+
     const metadata = {
         main_module: 'worker.js',
         compatibility_date: '2024-11-01',
         bindings: [
-            { type: 'secret_text', name: 'TS_OAUTH_CLIENT_ID', text: tsClientId },
-            { type: 'secret_text', name: 'TS_OAUTH_CLIENT_SECRET', text: tsClientSecret },
-            { type: 'secret_text', name: 'TS_TAILNET', text: tsTailnet },
+            ...(hasTs ? [
+                { type: 'secret_text', name: 'TS_OAUTH_CLIENT_ID', text: tsClientId },
+                { type: 'secret_text', name: 'TS_OAUTH_CLIENT_SECRET', text: tsClientSecret },
+                { type: 'secret_text', name: 'TS_TAILNET', text: tsTailnet },
+            ] : []),
             // What binds this deployment to THIS installation. Without it the Worker sits
             // on a public hostname handing pre-authorized, exit-node-approved Tailscale
             // keys to anyone who asks — see the header of worker.js. Uploaded as a
             // secret_text binding, so it is encrypted at rest on Cloudflare exactly like
             // the OAuth client secret beside it.
             { type: 'secret_text', name: 'GT_SIGNING_SECRET', text: getInstallSecret() },
+            // The two stable tunnels as Workers VPC networks (gt-slots.js), on EVERY deploy —
+            // a redeploy that left them out would cut the stable path of every later session.
+            ...slotBindings,
         ],
     };
 
@@ -149,7 +177,9 @@ async function deployBroker({ email, token, accountName, tsClientId, tsClientSec
         await callApi(cfAccountId, token, email, 'POST', `/workers/scripts/${WORKER_NAME}/subdomain`, { enabled: true });
     } catch (e) {
         if (e.message && e.message.includes('workers.dev')) {
-            const randomSub = 'mlmvpn' + Date.now().toString(36).slice(-6);
+            // Neutral on purpose — the same rule as WORKER_NAME above. The old fallback put
+            // «mlmvpn» (and so «vpn») into the account's public workers.dev name.
+            const randomSub = 'app' + require('crypto').randomBytes(5).toString('hex');
             await callApi(cfAccountId, token, email, 'PUT', '/workers/subdomain', { subdomain: randomSub });
             await callApi(cfAccountId, token, email, 'POST', `/workers/scripts/${WORKER_NAME}/subdomain`, { enabled: true });
         } else {
@@ -169,8 +199,13 @@ async function deployBroker({ email, token, accountName, tsClientId, tsClientSec
         ...prev,
         deployed: true, url, accountName: accountName || '', deployedAt: Date.now(),
         authVersion: BROKER_AUTH_VERSION,
-        // Remembered so a later redeploy is one click, not a trip to the Tailscale console.
-        tsClientId, tsClientSecret, tsTailnet,
+        cfAccountId,
+        slotsBound: slotBindings.map((b) => b.name),
+        // Remembered so a later redeploy is one click, not a trip to the Tailscale console. A
+        // v2-only redeploy passes none, and keeps whatever was stored before.
+        tsClientId: hasTs ? tsClientId : (prev.tsClientId || ''),
+        tsClientSecret: hasTs ? tsClientSecret : (prev.tsClientSecret || ''),
+        tsTailnet: hasTs ? tsTailnet : (prev.tsTailnet || ''),
     });
     log('سرویس شبکه‌ی امن آماده شد.');
     return { url };
@@ -193,4 +228,4 @@ function setCustomUrl(url) {
     return { customUrl: s.customUrl };
 }
 
-module.exports = { status, deployBroker, getBrokerUrl, setCustomUrl, WORKER_NAME };
+module.exports = { status, deployBroker, getBrokerUrl, setCustomUrl, authHeaders, WORKER_NAME };

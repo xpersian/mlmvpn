@@ -165,7 +165,105 @@ jobs:
 `;
 }
 
+// ── v2: ubuntu, Xray behind Cloudflare quick tunnels, credentials sealed to the client ────────
+//
+// A separate file, so the v1 workflow above stays intact for a rollback until v2 has replaced
+// it everywhere. Linux bills at 1× against Windows' 2× — the same free allowance buys twice the
+// sessions — and boots in ~70 s instead of up to 8 min (measured 2026-09-23).
+//
+// Inputs are handed to the agent through env, never spliced into a `run:` script: a dispatch
+// input spliced into shell text is a command-injection hole. The agent validates them again.
+// No repository secret is involved: GitHub resolves those when a job STARTS, so with sessions
+// dispatched back to back on one account, one runner could read the secret meant for another.
+// The client's public key travels as an input instead and everything comes back sealed to it
+// (runner/seal.mjs, gt-session-crypto.js).
+const WORKFLOW_V2_FILENAME = 'mlmvpn-tunnel-v2.yml';
+const WORKFLOW_V2_PATH = `.github/workflows/${WORKFLOW_V2_FILENAME}`;
+// The files the workflow runs, in the repo next to it: `ensureFile` re-pushes them only when
+// their content changes, so an app update rolls out to every account on its next session.
+const AGENT_FILES = {
+    'agent/gt-agent.mjs': 'gt-agent.mjs',
+    'agent/seal.mjs': 'seal.mjs',
+    // The runner's Xray config, kept out of the agent so the app's tests can build and check it.
+    'agent/xray-config.mjs': 'xray-config.mjs',
+    'agent/exits.mjs': 'exits.mjs',
+};
+
+function buildWorkflowYamlV2() {
+    return `# Managed by MLMVPN — GitHub Tunnel v2. Do not edit; MLMVPN overwrites this on update.
+name: mlmvpn-tunnel-v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: 'Session'
+        required: true
+        type: string
+      client_pub:
+        description: 'Client key'
+        required: true
+        type: string
+      xray_version:
+        description: 'Core version'
+        required: false
+        type: string
+        default: '26.9.9'
+      slot:
+        description: 'Stable path'
+        required: false
+        type: string
+        default: ''
+      exits:
+        description: 'Exit countries'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  cloud-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${SESSION_LIFETIME_MINUTES}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: agent
+      - name: Cloud session
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          SESSION_ID: \${{ inputs.session_id }}
+          CLIENT_PUB: \${{ inputs.client_pub }}
+          XRAY_VERSION: \${{ inputs.xray_version }}
+          KEEP_ALIVE_MINUTES: '${KEEP_ALIVE_MINUTES}'
+          # The stable tunnel (github-tunnel/gt-slots.js): which slot this session runs, and the
+          # connector tokens as repository secrets — masked in logs, empty when never set.
+          SLOT: \${{ inputs.slot }}
+          # The exit countries the user chose (runner/exits.mjs), started as soon as the session is
+          # open so they are ready by the time the client asks. Country codes only — nothing secret.
+          EXITS: \${{ inputs.exits }}
+          GT_SLOT_A: \${{ secrets.GT_SLOT_A }}
+          GT_SLOT_B: \${{ secrets.GT_SLOT_B }}
+          GT_SLOT_C: \${{ secrets.GT_SLOT_C }}
+        run: node agent/gt-agent.mjs
+`;
+}
+
+/** The agent files' content, read from the app's own copy of runner/. */
+function agentFiles() {
+    const fs = require('fs');
+    const path = require('path');
+    const out = {};
+    for (const [repoPath, local] of Object.entries(AGENT_FILES)) {
+        out[repoPath] = fs.readFileSync(path.join(__dirname, 'runner', local), 'utf8');
+    }
+    return out;
+}
+
 module.exports = {
     buildWorkflowYaml,
+    buildWorkflowYamlV2, agentFiles, WORKFLOW_V2_FILENAME, WORKFLOW_V2_PATH,
     SESSION_LIFETIME_MINUTES, KEEP_ALIVE_MINUTES, USABLE_SESSION_MINUTES,
 };

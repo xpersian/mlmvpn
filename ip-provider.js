@@ -290,14 +290,8 @@ function parseUserInput(text) {
         for (let i = 0; i < count; i++) singleIps.push({ ip: intToIp((s + i) >>> 0), provider: currentProvider });
       }
     } else {
-      let ipStr = line;
-      if (ipStr.includes(':')) {
-        const parts = ipStr.split(':');
-        // If it's not an IPv6 address, strip the port
-        if (parts.length === 2) {
-          ipStr = parts[0];
-        }
-      }
+      // `v4:port` and `[v6]:port` lose their port; a bare IPv6 keeps every group.
+      let ipStr = require('./public/cf-uri').bareAddress(line);
       if (ipStr.includes(":") || ipToInt(ipStr) !== null) {
         singleIps.push({ ip: ipStr, provider: currentProvider });
       }

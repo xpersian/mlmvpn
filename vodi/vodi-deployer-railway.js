@@ -49,6 +49,48 @@ const VODI_START = process.env.VODI_START || 'uvicorn main:app --host 0.0.0.0 --
 const VODI_IMAGE = process.env.VODI_IMAGE || '';
 const GQL = 'https://backboard.railway.app/graphql/v2';
 
+// ── the panels this deployer can put on Railway ─────────────────────────────────
+//
+// Both are FastAPI panels of the same family (the link/quota API has the same shape), deployed
+// UNMODIFIED from their developers' public repositories — so every deploy and every «بروزرسانی»
+// builds whatever the developer published last, and nothing of theirs is bundled in this app.
+//
+// RVG (github.com/arvin341az-glitch/RVG, «RVG Gateway» by codebox): its licence allows running and
+// deploying the unmodified software and forbids publishing modified copies — building straight from
+// the developer's repo is exactly the permitted shape. It differs from VodiWalker in four places,
+// all read from its main.py (2026-09-29): login is `{password}` only (ADMIN_PASSWORD, no username),
+// the session cookie is `rvg_session`, the share link is `vless_link`, and there is no
+// /api/protocols, /api/telemetry, /reset-usage or /regenerate (PATCH `reset_usage`, /api/system).
+const PANELS = {
+    vodi: {
+        id: 'vodi', title: 'VodiWalker',
+        repo: VODI_REPO, branch: VODI_BRANCH, start: VODI_START, image: VODI_IMAGE,
+        cookie: /(?:vodiwalker_session|x4g_session)=[^;,\s]+/,
+        usesUsername: true,
+        env: ({ username, password, secretKey }) => ({ ADMIN_USERNAME: username, ADMIN_PASSWORD: password, SECRET_KEY: secretKey, DATA_DIR: '/data' }),
+    },
+    rvg: {
+        id: 'rvg', title: 'RVG Gateway',
+        repo: process.env.RVG_REPO || 'arvin341az-glitch/RVG', branch: process.env.RVG_BRANCH || 'main',
+        start: 'uvicorn main:app --host 0.0.0.0 --port $PORT', image: '',
+        cookie: /rvg_session=[^;,\s]+/,
+        usesUsername: false,
+        // What its /api/links accepts that a Railway HTTPS domain can carry: mtproto and
+        // shadowsocks need a raw TCP port this wizard does not provision.
+        protocols: ['vless-ws', 'xhttp-packet-up', 'xhttp-stream-up', 'trojan-ws', 'trojan-xhttp-packet-up', 'trojan-xhttp-stream-up'],
+        // Its main.py reads ZoneInfo('Asia/Tehran') at import and its requirements.txt does not pull
+        // tzdata: on an image without /usr/share/zoneinfo the panel dies at startup (reproduced here
+        // on 2026-09-29). The builder is asked for the system package instead of editing their code;
+        // it also needs Python 3.10+ (`str | None`). Both builders' spellings, since Railway picks.
+        env: ({ password, secretKey }) => ({
+            ADMIN_PASSWORD: password, SECRET_KEY: secretKey, DATA_DIR: '/data',
+            NIXPACKS_APT_PKGS: 'tzdata', RAILPACK_DEPLOY_APT_PACKAGES: 'tzdata',
+            NIXPACKS_PYTHON_VERSION: '3.11', RAILPACK_PYTHON_VERSION: '3.11',
+        }),
+    },
+};
+const panelOf = (gw) => PANELS[(gw && gw.panel) || 'vodi'] || PANELS.vodi;
+
 const REGIONS = [
     { value: 'us-west2',       label: 'آمریکا — غرب (California)' },
     { value: 'us-east4',       label: 'آمریکا — شرق (Virginia)' },
@@ -439,7 +481,7 @@ async function testGateway(gatewayId, what = 'all') {
             if (res.ok) {
                 out.authOk = true;
                 // Prove the cookie is usable, not just that login returned 200.
-                out.gotSession = !!sessionCookie(res);
+                out.gotSession = !!sessionCookie(res, gw);
             } else if (res.status === 401) {
                 out.authOk = false;
                 out.authError = 'نام کاربری یا رمز اشتباه است — مشخصات ذخیره‌شده با سرور یکی نیست';
@@ -471,6 +513,7 @@ const sessionCache = new Map();
  * required here.
  */
 function loginBody(gw) {
+    if (!panelOf(gw).usesUsername) return { password: gw.adminPassword };
     return { username: gw.adminUsername || store.DEFAULT_ADMIN_USERNAME, password: gw.adminPassword };
 }
 
@@ -482,11 +525,11 @@ function loginBody(gw) {
  * keeping them manageable from the app. `Set-Cookie` can legitimately carry several
  * cookies, so match the named one rather than taking the header's first value.
  */
-function sessionCookie(res) {
+function sessionCookie(res, gw) {
     const raw = typeof res.headers.getSetCookie === 'function'
         ? res.headers.getSetCookie().join(', ')
         : (res.headers.get('set-cookie') || '');
-    const m = raw.match(/(?:vodiwalker_session|x4g_session)=[^;,\s]+/);
+    const m = raw.match(panelOf(gw).cookie) || raw.match(/(?:vodiwalker_session|x4g_session|rvg_session)=[^;,\s]+/);
     return m ? m[0] : '';
 }
 
@@ -506,7 +549,7 @@ async function loginGateway(gw) {
     if (res.status === 401) throw new Error('نام کاربری یا رمز ادمین اشتباه است — با «تست رمز» بررسی کنید.');
     if (res.status === 429) throw new Error('سرور ورود را موقتاً مسدود کرده است — چند دقیقه صبر کنید.');
     if (!res.ok) throw new Error(`ورود به پنل ناموفق بود (${res.status}).`);
-    const cookie = sessionCookie(res);
+    const cookie = sessionCookie(res, gw);
     if (!cookie) throw new Error('کوکی سشن از پنل دریافت نشد.');
     sessionCache.set(gw.id, { cookie, at: Date.now() });
     return cookie;
@@ -561,28 +604,29 @@ async function vodiApi(gw, method, endpoint, body = null) {
  * Returns { serviceId, source } where `source` is recorded on the gateway, so a later
  * redeploy repeats whatever actually worked rather than guessing again.
  */
-async function createPanelService(ctx, projectId, environmentId, svcName, emit) {
-    emit(`ساخت سرویس از روی سورس پنل (${VODI_REPO})…`);
+async function createPanelService(ctx, projectId, environmentId, svcName, emit, panel = PANELS.vodi) {
+    emit(`ساخت سرویس از روی سورس پنل ${panel.title} (${panel.repo}) — آخرین نسخهٔ سازنده…`);
     try {
         const serviceId = await serviceCreate(ctx, projectId, environmentId, svcName,
-            { repo: VODI_REPO, branch: VODI_BRANCH });
-        return { serviceId, source: `repo:${VODI_REPO}@${VODI_BRANCH}` };
+            { repo: panel.repo, branch: panel.branch });
+        return { serviceId, source: `repo:${panel.repo}@${panel.branch}` };
     } catch (e) {
-        if (!VODI_IMAGE) {
+        if (!panel.image) {
             throw new Error(
                 `Railway نتوانست سرویس را از سورس بسازد: ${e.message}\n` +
                 'معمولاً یعنی این حساب Railway هنوز به گیت‌هاب وصل نشده. از مرحلهٔ «گیت‌هاب» ' +
                 'همین پنل حساب را وصل کنید و دوباره تلاش کنید.');
         }
-        emit(`ساخت از سورس ناموفق بود (${e.message}) — با ایمیج ${VODI_IMAGE} تلاش می‌کنیم…`);
+        emit(`ساخت از سورس ناموفق بود (${e.message}) — با ایمیج ${panel.image} تلاش می‌کنیم…`);
         const serviceId = await serviceCreate(ctx, projectId, environmentId, svcName,
-            { image: VODI_IMAGE });
-        return { serviceId, source: `image:${VODI_IMAGE}` };
+            { image: panel.image });
+        return { serviceId, source: `image:${panel.image}` };
     }
 }
 
-async function deployGateway({ accountId, name, region, adminUsername, adminPassword, onLog = () => {} }) {
+async function deployGateway({ accountId, name, region, adminUsername, adminPassword, panel: panelId = 'vodi', onLog = () => {} }) {
     const emit = (m) => { try { onLog(m); } catch (e) {} };
+    const panel = PANELS[panelId] || PANELS.vodi;
     const acc = await resolveAccount(accountId);
 
     emit(`بررسی توکن Railway «${acc.name}»…`);
@@ -607,19 +651,19 @@ async function deployGateway({ accountId, name, region, adminUsername, adminPass
         environmentId = ctx.environmentId;
     } else {
         emit('ساخت پروژه‌ی جدید در Railway…');
-        ({ projectId, environmentId } = await projectCreate(ctx, name || 'vodi-panel'));
+        ({ projectId, environmentId } = await projectCreate(ctx, name || (panel.id + '-panel')));
     }
 
     // Unique service name so a second gateway in the same project (project-token case)
     // does not collide.
-    const svcName = 'vodi-' + Math.random().toString(36).slice(2, 7);
+    const svcName = panel.id + '-' + Math.random().toString(36).slice(2, 7);
     const { serviceId, source } = await createPanelService(
-        ctx, projectId, environmentId, svcName, emit);
+        ctx, projectId, environmentId, svcName, emit, panel);
 
     // Region and start command both live on the service instance, so they go together.
     // The start command is what makes the Nixpacks build deterministic; a region that
     // Railway rejects must not take it down with it, hence the retry without region.
-    const instancePatch = { startCommand: VODI_START };
+    const instancePatch = { startCommand: panel.start };
     if (region) {
         emit('تعیین لوکیشن سرویس…');
         instancePatch.region = region;
@@ -628,7 +672,7 @@ async function deployGateway({ accountId, name, region, adminUsername, adminPass
         await serviceInstanceUpdate(ctx, serviceId, environmentId, instancePatch);
     } catch (e) {
         emit(`تنظیم لوکیشن/دستور اجرا ناموفق بود (${e.message}) — بدون لوکیشن دوباره تلاش می‌کنیم.`);
-        try { await serviceInstanceUpdate(ctx, serviceId, environmentId, { startCommand: VODI_START }); }
+        try { await serviceInstanceUpdate(ctx, serviceId, environmentId, { startCommand: panel.start }); }
         catch (e2) { emit(`تعیین دستور اجرا هم نشد (${e2.message}) — Railway خودش تشخیص می‌دهد.`); }
     }
 
@@ -638,9 +682,11 @@ async function deployGateway({ accountId, name, region, adminUsername, adminPass
     catch (e) { emit(`ساخت volume ناموفق بود (${e.message}) — کاربران با ری‌استارت ممکن است پاک شوند.`); }
 
     emit('تنظیم متغیرهای محیطی…');
-    await variableUpsert(ctx, projectId, environmentId, serviceId, 'ADMIN_USERNAME', username);
-    await variableUpsert(ctx, projectId, environmentId, serviceId, 'ADMIN_PASSWORD', password);
-    await variableUpsert(ctx, projectId, environmentId, serviceId, 'SECRET_KEY', secretKey);
+    // Each panel reads its own set (RVG has no username); DATA_DIR is common to both.
+    for (const [k, v] of Object.entries(panel.env({ username, password, secretKey }))) {
+        if (k === 'DATA_DIR') continue;
+        await variableUpsert(ctx, projectId, environmentId, serviceId, k, v);
+    }
     // The panel reads RAILWAY_VOLUME_MOUNT_PATH first (Railway injects it once a volume is
     // attached) and falls back to DATA_DIR. Setting DATA_DIR too means a deploy whose
     // volume failed above still writes somewhere predictable instead of the image's CWD.
@@ -656,7 +702,7 @@ async function deployGateway({ accountId, name, region, adminUsername, adminPass
 
     const gw = store.addGateway({
         name: name || 'سرور من', region: region || '',
-        adminUsername: username, adminPassword: password, secretKey,
+        adminUsername: username, adminPassword: password, secretKey, panel: panel.id,
         railwayProjectId: projectId, railwayServiceId: serviceId,
         railwayEnvId: environmentId, railwayVolumeId: volumeId,
         railwayAccountId: acc.id, railwayAuthMode: ctx.authMode,
@@ -736,7 +782,7 @@ async function redeployGateway(gatewayId, { onLog = () => {} } = {}) {
     }
     const acc = await resolveAccount(gw.railwayAccountId);
     const ctx = await resolveContext(acc.token);
-    const source = gw.source || `repo:${VODI_REPO}@${VODI_BRANCH}`;
+    const source = gw.source || `repo:${panelOf(gw).repo}@${panelOf(gw).branch}`;
     onLog(`استقرار دوبارهٔ «${gw.name}» از ${source}…`);
     await serviceRedeploy(ctx, gw.railwayServiceId, gw.railwayEnvId);
     // A rebuild takes longer than an image pull, so wait proportionally rather than
@@ -777,6 +823,7 @@ async function getAdminConfig(gatewayId) {
 }
 
 module.exports = {
+    PANELS, panelOf,
     REGIONS, VODI_REPO, VODI_BRANCH, VODI_IMAGE, VODI_START, OAUTH_ACCOUNT_ID,
     getAccounts, resolveAccount, verifyToken, resolveContext, testGateway,
     deployGateway, deleteGateway, redeployGateway, getDeploymentStatus,

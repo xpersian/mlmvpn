@@ -37,7 +37,19 @@ const warp = catalog.BY_ID.warp;
 t('aether is installed from the developer directly', !!(warp.upstream && warp.upstream.direct));
 eq('…from CluvexStudio/Aether', warp.upstream.repo, 'CluvexStudio/Aether');
 eq('…and it is no longer built by us', warp.upstream.builtBy, undefined);
-eq('exactly one core opts into direct installs', direct.tracked().length, 1);
+// Typed out, not counted: two cores do this today, and a third should be added here by name.
+eq('exactly aether and softether opt into direct installs',
+    direct.tracked().map((i) => i.id).sort().join(','), 'softether,warp');
+
+// SoftEther, since 2026-09-22 («بزار مستقیم از خود توسعه دهنده … دریافت بشه»). Its Windows client is
+// only ever its own installer, with no GitHub digest — the anchor is SoftEther's own signature.
+const se = catalog.BY_ID.softether;
+eq('softether is installed from SoftEther\'s own repo', se.upstream.repo, 'SoftEtherVPN/SoftEtherVPN_Stable');
+eq('…as their installer, unpacked without running it', se.upstream.direct.format, 'sfx');
+eq('…anchored on SoftEther Corporation\'s signature', se.upstream.direct.signedBy, 'SOFTETHER CORPORATION');
+t('…and not built by us any more', !se.upstream.builtBy);
+t('…with the two files the installer lacks taken from the app\'s own copy',
+    (se.companions || []).map((c) => c.rel).sort().join(',') === 'LICENSE.txt,lang.config');
 
 // ── the asset name ───────────────────────────────────────────────────────────
 eq('a fixed asset name is used as is',
@@ -99,6 +111,36 @@ const withAssets = (map, fn) => {
         () => direct.resolve(item, rel),
     );
     t('an asset with no digest is refused', !noDigest.ok);
+
+    // ── a publisher that signs instead: SoftEther ────────────────────────────
+    const seItem = { id: 'softether', upstream: { type: 'github', repo: 'SoftEtherVPN/SoftEtherVPN_Stable', direct: se.upstream.direct } };
+    const seRel = { version: '4.44.9807', tag: 'v4.44-9807-rtm', at: '2025-05-07T00:00:00Z' };
+    const WIN = 'softether-vpnclient-v4.44-9807-rtm-2025.04.16-windows-x86_x64-intel.exe';
+    const release = {
+        [WIN]: { sha256: null, url: 'https://github.com/x/' + WIN },
+        'softether-vpnclient-v4.44-9807-rtm-2025.04.16-linux-x64-64bit.tar.gz': { sha256: null, url: 'https://github.com/x/l' },
+        'softether-vpnserver_vpnbridge-v4.44-9807-rtm-2025.04.16-windows-x86_x64-intel.exe': { sha256: null, url: 'https://github.com/x/s' },
+    };
+    const signed = await withAssets(release, () => direct.resolve(seItem, seRel));
+    t('the real release shape resolves', signed.ok, signed.ok ? '' : String(signed.error));
+    if (signed.ok) {
+        const a = signed.value.artifacts[0];
+        eq('…to the CLIENT installer, found by pattern (the name carries a build date the tag does not)', a.name, WIN);
+        eq('…with no digest', a.sha256, null);
+        eq('…and the signer install must find on it instead', a.signedBy, 'SOFTETHER CORPORATION');
+        eq('…unpacked as an sfx', a.format, 'sfx');
+    }
+    const both = await withAssets({ [WIN]: { sha256: DIGEST, url: 'https://github.com/x/' + WIN } }, () => direct.resolve(seItem, seRel));
+    t('a later release WITH a digest keeps the signature requirement too',
+        both.ok && both.value.artifacts[0].sha256 === DIGEST && both.value.artifacts[0].signedBy === 'SOFTETHER CORPORATION');
+    const twice = await withAssets({ [WIN]: release[WIN], ['softether-vpnclient-v4.44-9807-rtm-2025.04.17-windows-x86_x64-intel.exe']: release[WIN] },
+        () => direct.resolve(seItem, seRel));
+    t('two files matching the pattern is refused, not guessed between', !twice.ok);
+    const none = await withAssets({ 'softether-vpnclient-v4.44-9807-rtm-2025.04.16-linux-x64-64bit.tar.gz': release['softether-vpnclient-v4.44-9807-rtm-2025.04.16-linux-x64-64bit.tar.gz'] },
+        () => direct.resolve(seItem, seRel));
+    t('no windows installer in the release resolves to nothing', !none.ok);
+    const unsigned = await withAssets(release, () => direct.resolve({ id: 'x', upstream: { type: 'github', repo: 'a/b', direct: Object.assign({}, se.upstream.direct, { signedBy: undefined }) } }, seRel));
+    t('without a signer named, a digest-less asset is still refused', !unsigned.ok);
 
     // ── what counts as an update ─────────────────────────────────────────────
     eq('a newer developer build is an update', direct.isNewer({ version: '2.0.0' }, '1.9.0'), true);

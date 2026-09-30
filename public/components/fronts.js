@@ -1222,6 +1222,7 @@
           <span class="mv-form-label">حساب<small>${uid ? `شمارهٔ ${esc(fa(uid))}` : 'ساخته شده و ذخیره است'}</small></span>
           <span class="mv-form-value">آماده</span>
         </div>
+        ${accountFacts(s.acct)}
         <button type="button" class="mv-form-row is-action" data-acct="info">
           <span class="mv-form-label">بررسی حساب<small>از خودِ شبکه می‌پرسد حساب سالم است یا نه</small></span>
           <i class="ph-bold ph-arrows-clockwise mv-row-end"></i>
@@ -1229,6 +1230,22 @@
         <button type="button" class="mv-form-row is-action" data-acct="paste">
           <span class="mv-form-label">جای‌گذاری کد حساب دیگر<small>اگر کد حسابی دارید که جای دیگری ساخته شده</small></span>
           <i class="ph-bold ph-clipboard-text mv-row-end"></i>
+        </button>
+        <button type="button" class="mv-form-row is-action" data-acct="voucher">
+          <span class="mv-form-label">هدیهٔ رایگان<small>اگر شبکهٔ گف برای این حساب کد هدیه‌ای دارد، نشانش می‌دهد</small></span>
+          <i class="ph-bold ph-gift mv-row-end"></i>
+        </button>
+        <button type="button" class="mv-form-row is-action" data-acct="redeem">
+          <span class="mv-form-label">وارد کردن کد هدیه<small>روزهای Plus به همین حساب اضافه می‌شود — خریدی در کار نیست</small></span>
+          <i class="ph-bold ph-ticket mv-row-end"></i>
+        </button>
+        ${s.acct && s.acct.canRotate ? `<button type="button" class="mv-form-row is-action" data-acct="rotate">
+          <span class="mv-form-label">کد تازه<small>کدهای نسل اول (شروع با ۹) عوض می‌شوند؛ کد قبلی همه‌جا از کار می‌افتد</small></span>
+          <i class="ph-bold ph-key mv-row-end"></i>
+        </button>` : ''}
+        <button type="button" class="mv-form-row is-action" data-acct="news">
+          <span class="mv-form-label">خبرهای گف<small>اطلاعیه‌های خود شبکهٔ گف</small></span>
+          <i class="ph-bold ph-megaphone mv-row-end"></i>
         </button>
         <button type="button" class="mv-form-row is-action" data-acct="copy">
           <span class="mv-form-label">کپی کد حساب<small>برای نگه داشتن یا بردن جای دیگر — مثل رمز نگهش دارید</small></span>
@@ -1247,12 +1264,25 @@
         <button type="button" class="mv-form-row is-action" data-acct="paste">
           <span class="mv-form-label">کد حساب دارم<small>کدی که قبلاً ساخته‌اید را بچسبانید</small></span>
           <i class="ph-bold ph-clipboard-text mv-row-end"></i>
+        </button>
+        <button type="button" class="mv-form-row is-action" data-acct="legacy">
+          <span class="mv-form-label">حساب قدیمی (نام کاربری و رمز)<small>حساب‌های پیش از Geph5 کد ندارند</small></span>
+          <i class="ph-bold ph-user mv-row-end"></i>
         </button>`);
         }
+        if (has && !s.regBusy) rows.push(gephSettingsRows(s));
         host.innerHTML = rows.join('');
         host.querySelectorAll('[data-acct]').forEach(b => {
             b.onclick = () => accountAction(id, b.getAttribute('data-acct'));
         });
+        host.querySelectorAll('[data-gset]').forEach(b => {
+            b.onclick = () => gephSetting(id, b.getAttribute('data-gset'), b.getAttribute('data-i'));
+        });
+        if (has && !s.gset && !s.gsetLoading) {
+            s.gsetLoading = true;
+            fetch('/api/geph/settings').then((r) => r.json()).then((j) => { s.gset = j.settings || null; s.gsetLoading = false; renderAccount(id); })
+                .catch(() => { s.gsetLoading = false; });
+        }
 
         const note = el(id, 'account-note');
         if (note) {
@@ -1260,6 +1290,74 @@
                 ? 'کد حساب تنها چیزی است که شما را به این حساب وصل می‌کند — جایی یادداشتش کنید. گف اسمی از شما ندارد، پس کد گم‌شده قابل بازیابی نیست.'
                 : 'گف بدون حساب وصل نمی‌شود، ولی حساب <b>رایگان</b> است و هیچ اطلاعاتی از شما نمی‌خواهد: سرور یک معما می‌دهد، دستگاه شما حلش می‌کند، و یک کد تحویل می‌گیرد. همین. <b>ثبت‌نام در سایت لازم نیست</b> — پایین، بخش راهنما.');
         }
+    }
+
+    /**
+     * «گف»'s own settings (Android 1.2.36 › ۵): direct dial to the exit, the exit's ad / adult
+     * blocklists and the user's port forwards. Each is off by default, as in the official app, and
+     * applies on the next connect.
+     */
+    function gephSettingsRows(s) {
+        const g = s.gset;
+        if (!g) return '<div class="mv-form-row"><span class="mv-form-label">تنظیمات گف<small>در حال خواندن…</small></span></div>';
+        const tog = (k, label, sub) => `<button type="button" class="mv-form-row is-action" data-gset="${k}">
+          <span class="mv-form-label">${label}<small>${sub}</small></span>
+          <span class="mv-form-value">${g[k] ? 'روشن' : 'خاموش'}</span>
+        </button>`;
+        const fw = (g.forwards || []).map((x, i) => `<button type="button" class="mv-form-row is-action" data-gset="fw-del" data-i="${i}">
+          <span class="mv-form-label" dir="ltr">${esc(x.listen)} → ${esc(x.connect)}<small>برای حذف بزنید</small></span>
+          <i class="ph-bold ph-x mv-row-end"></i>
+        </button>`).join('');
+        return `<div class="mv-form-row"><span class="mv-form-label">تنظیمات گف<small>از اتصال بعدی اعمال می‌شود</small></span></div>
+        ${tog('blockAds', 'مسدود کردن تبلیغات', 'فهرست مسدودی خود سرور خروجی گف')}
+        ${tog('blockAdult', 'مسدود کردن محتوای بزرگسال', 'فهرست مسدودی خود سرور خروجی گف')}
+        ${tog('allowDirect', 'اتصال مستقیم به خروجی', 'کنار پل‌ها، مستقیم هم امتحان می‌شود؛ جایی که خروجی‌ها مسدودند فقط کمی تأخیر می‌افزاید')}
+        ${fw}
+        <button type="button" class="mv-form-row is-action" data-gset="fw-add">
+          <span class="mv-form-label">فوروارد پورت<small>یک پورت محلی که فقط به یک مقصد، از راه گف، می‌رود</small></span>
+          <i class="ph-bold ph-plus mv-row-end"></i>
+        </button>`;
+    }
+    async function gephSetting(id, what, idx) {
+        const s = st[id];
+        const g = Object.assign({ forwards: [] }, s.gset || {});
+        let patch = null;
+        if (['blockAds', 'blockAdult', 'allowDirect'].includes(what)) patch = { [what]: !g[what] };
+        else if (what === 'fw-del') patch = { forwards: g.forwards.filter((_, i) => String(i) !== String(idx)) };
+        else if (what === 'fw-add') {
+            const listen = await window.uiModal.prompt('پورت محلی', '127.0.0.1:20860', { placeholder: '127.0.0.1:PORT', ok: 'بعدی', cancel: 'انصراف' });
+            if (!listen) return;
+            const connect = await window.uiModal.prompt('مقصد (از راه گف)', '', { placeholder: 'host:port', ok: 'افزودن', cancel: 'انصراف' });
+            if (!connect) return;
+            patch = { forwards: g.forwards.concat([{ listen: listen.trim(), connect: connect.trim() }]) };
+        }
+        if (!patch) return;
+        try {
+            const r = await fetch('/api/geph/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.error || 'ذخیره نشد');
+            s.gset = j.settings;
+            s.acctNote = j.running ? 'ذخیره شد — از اتصال بعدی اعمال می‌شود.' : 'ذخیره شد.';
+        } catch (e) { s.acctNote = e.message; }
+        renderAccount(id);
+    }
+
+    /** Level, expiry and the monthly allowance, as the broker reported them (Android's rows). */
+    function accountFacts(a) {
+        if (!a || !a.ok) return '';
+        const LV = { free: 'رایگان', basic: 'Basic', plus: 'Plus' };
+        const date = (u) => { try { return new Date(u * 1000).toLocaleDateString('fa-IR'); } catch (e) { return ''; } };
+        const out = [`<div class="mv-form-row"><span class="mv-form-label">نوع حساب</span><span class="mv-form-value">${esc(LV[a.level] || a.level || '—')}</span></div>`];
+        const exp = a.info && Number(a.info.plus_expires_unix);
+        if (a.level !== 'free' && exp) out.push(`<div class="mv-form-row"><span class="mv-form-label">انقضا${a.info.recurring ? '<small>تمدید خودکار</small>' : ''}</span><span class="mv-form-value">${esc(date(exp))}</span></div>`);
+        if (a.usage && a.usage.limitMb != null) out.push(`<div class="mv-form-row"><span class="mv-form-label">مصرف این دوره${a.usage.renewUnix ? `<small>تمدید ${esc(date(a.usage.renewUnix))}</small>` : ''}</span><span class="mv-form-value">${esc(fa(a.usage.usedMb))} از ${esc(fa(a.usage.limitMb))} مگابایت</span></div>`);
+        return out.join('');
+    }
+    async function acctPost(body) {
+        const r = await fetch('/api/geph/account', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const out = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(out.error || ('خطای ' + r.status));
+        return out;
     }
 
     async function accountAction(id, what) {
@@ -1309,6 +1407,62 @@
             s.busy = false;
             await refresh(id);
             return;
+        }
+        if (what === 'legacy') {
+            const user = await window.uiModal.prompt('نام کاربری حساب قدیمی گف', '', { placeholder: 'نام کاربری', ok: 'بعدی', cancel: 'انصراف' });
+            if (!user) return;
+            const pass = await window.uiModal.prompt('رمز همین حساب', '', { placeholder: 'رمز', ok: 'ورود', cancel: 'انصراف' });
+            if (!pass) return;
+            s.busy = true; paint(id);
+            try { const out = await acctPost({ action: 'legacy', username: user, password: pass }); s.acct = out.account || null; s.acctNote = 'وارد شدید.'; }
+            catch (e) { s.acctNote = e.message; }
+            s.busy = false; await refresh(id); return;
+        }
+        if (what === 'voucher') {
+            s.busy = true; paint(id);
+            try {
+                const out = await acctPost({ action: 'voucher' });
+                const v = out.voucher;
+                if (!v) s.acctNote = 'شبکهٔ گف الان هدیه‌ای برای این حساب ندارد.';
+                else {
+                    const why = (v.explanation && (v.explanation.fa || v.explanation.en || Object.values(v.explanation)[0])) || '';
+                    const take = await window.uiModal.confirm({ title: 'هدیهٔ گف', message: (why ? why + '\n\n' : '') + 'کد: ' + v.code, confirmLabel: 'همین حالا وارد کن', cancelLabel: 'بعداً' });
+                    if (take) { const r2 = await acctPost({ action: 'redeem', code: v.code }); s.acct = r2.account || s.acct; s.acctNote = `${fa(r2.days)} روز به حساب اضافه شد.`; }
+                    else s.acctNote = 'کد هدیه: ' + v.code;
+                }
+            } catch (e) { s.acctNote = e.message; }
+            s.busy = false; await refresh(id); return;
+        }
+        if (what === 'redeem') {
+            const code = await window.uiModal.prompt('کد هدیهٔ گف', '', { placeholder: 'کد هدیه را بچسبانید…', ok: 'وارد کن', cancel: 'انصراف' });
+            if (!code) return;
+            s.busy = true; paint(id);
+            try { const out = await acctPost({ action: 'redeem', code }); s.acct = out.account || s.acct; s.acctNote = `${fa(out.days)} روز به حساب اضافه شد.`; }
+            catch (e) { s.acctNote = e.message; }
+            s.busy = false; await refresh(id); return;
+        }
+        if (what === 'rotate') {
+            const sure = await window.uiModal.confirm({ title: 'کد تازه بگیرید؟', message: 'کد فعلی همه‌جا از کار می‌افتد و هر دستگاه دیگری که این حساب را دارد باید با کد تازه وارد شود. کد تازه همین‌جا ذخیره و نشان داده می‌شود.', confirmLabel: 'کد تازه', cancelLabel: 'انصراف', danger: true });
+            if (!sure) return;
+            s.busy = true; paint(id);
+            try {
+                const out = await acctPost({ action: 'rotate' });
+                s.acct = out.account || s.acct;
+                try { await navigator.clipboard.writeText(out.secret); } catch (e) { /* shown below anyway */ }
+                await window.uiModal.alert({ title: 'کد تازهٔ حساب', message: out.secret.replace(/(\d{4})(?=\d)/g, '$1 ') + '\n\nدر کلیپ‌بورد هم هست. جایی یادداشتش کنید.' });
+            } catch (e) { s.acctNote = e.message; }
+            s.busy = false; await refresh(id); return;
+        }
+        if (what === 'news') {
+            s.busy = true; paint(id);
+            try {
+                const j = await (await fetch('/api/geph/news?lang=fa')).json();
+                const list = (j.news || []).slice(0, 8);
+                await window.uiModal.alert({ title: 'خبرهای گف', message: list.length
+                    ? list.map((n) => `${n.important ? '❗ ' : ''}${n.title}${n.date ? ' — ' + new Date(n.date * 1000).toLocaleDateString('fa-IR') : ''}\n${n.contents.replace(/<[^>]+>/g, '').slice(0, 400)}`).join('\n\n')
+                    : (j.error || 'خبری نیامد.') });
+            } catch (e) { s.acctNote = e.message; }
+            s.busy = false; paint(id); return;
         }
         if (what === 'copy') {
             try {

@@ -233,6 +233,71 @@ const CORES = [
         validate: 'probe',
         pin: null,
     },
+    {
+        id: 'softether', kind: 'core', group: 'cores',
+        title: 'هستهٔ گیت‌وی MLM (کلاینت سافت‌اتر)',
+        usedBy: 'گیت‌وی MLM',
+        // SoftEther publishes its Windows client ONLY as its own installer (.exe, packed by its
+        // build tool, and with no digest on the release page — that upload predates GitHub
+        // computing them). For a long time that meant the files could only reach users through
+        // the signed channel: a zip WE packed from the official binaries, pinned by its digest.
+        //
+        // Both halves of that obstacle are solved now, so this core installs straight from
+        // SoftEther's own release:
+        //   * store/sfx.js reads the files out of the installer's PE resource table, so nothing
+        //     is executed — running a setup program is what this store must never do;
+        //   * store/authenticode.js anchors the download on SOFTETHER CORPORATION's own
+        //     signature instead of a digest. The files are resources INSIDE that signed image,
+        //     so one check covers all of them, and it says who BUILT the bytes rather than who
+        //     received them.
+        //
+        // Verified against the real 4.44.9807 installer: the five binaries that come out are
+        // byte-for-byte identical to the ones this build ships.
+        //
+        // Tags are `v4.44-9807-rtm`; the two groups join as 4.44.9807, the number vpncmd reports.
+        upstream: {
+            type: 'github',
+            repo: 'SoftEtherVPN/SoftEtherVPN_Stable',
+            tagRe: '^v(\\d+\\.\\d+)-(\\d+)-(?:rtm|beta)$',
+            direct: {
+                // The date in the asset name is the BUILD date and does not follow from the tag,
+                // so this is matched against what the release actually lists, never predicted.
+                assetRe: '^softether-vpnclient-.*-windows-x86_x64-intel\\.exe$',
+                format: 'sfx',
+                signedBy: 'SOFTETHER CORPORATION',
+                // {inside the installer: where it lands}. The installer also carries vpnsetup,
+                // vpncmgr, vpninstall, install_src.dat and vpnweb.cab — the setup program's own
+                // parts, which this app never runs and does not install.
+                extract: {
+                    'vpnclient_x64.exe': 'vpnclient_x64.exe',
+                    'vpncmd_x64.exe': 'vpncmd_x64.exe',
+                    'vpnclient.exe': 'vpnclient.exe',
+                    'vpncmd.exe': 'vpncmd.exe',
+                    'hamcore.se2': 'hamcore.se2',
+                },
+                notes: 'ساخت رسمی خودِ سافت‌اتر، دست‌نخورده — همان نصابی که در گیت‌هاب منتشر کرده، با بررسی امضای دیجیتالش.',
+            },
+        },
+        // Two files the installer does not carry, taken from the copy this app ships (digests
+        // checked by the install, as for wintun.dll above).
+        //   * lang.config — «گیت‌وی MLM» cannot work without it: gateway-manager parses vpncmd's
+        //     ENGLISH output («completed successfully», the table labels), and SoftEther otherwise
+        //     follows the operating system's language. An install missing it would leave a
+        //     non-English Windows with an engine whose replies nothing can read — failing quietly,
+        //     and only for some users.
+        //   * LICENSE.txt — the Apache-2.0 text that has to travel with SoftEther's binaries.
+        companions: [
+            { rel: 'lang.config', from: 'softether/lang.config', sha256: '198a807286efe5d84bcccd01ca6d2e4b71dd0b4024919406395483117b745b81' },
+            { rel: 'LICENSE.txt', from: 'softether/LICENSE.txt', sha256: '5da6241ddb987c4543bf1cbba6b40a3cd3ecb624dbd4a63daf04440911656bde' },
+        ],
+        bundledDir: 'softether',
+        files: ['vpnclient_x64.exe', 'vpncmd_x64.exe', 'vpnclient.exe', 'vpncmd.exe', 'hamcore.se2', 'lang.config', 'LICENSE.txt'],
+        // The 32-bit vpncmd, on purpose: it runs on every Windows this app supports, 32-bit
+        // included, and its tools mode needs no client service to answer.
+        probe: { file: 'vpncmd.exe', args: ['/TOOLS', '/CMD', 'About'], re: /Version\s+([0-9]+\.[0-9]+)\s+Build\s+([0-9]+)/ },
+        validate: 'probe',
+        pin: null,
+    },
 ];
 
 // ── workers ──────────────────────────────────────────────────────────────────
@@ -248,8 +313,72 @@ const CORES = [
 const has = (text, ...needles) => needles.every((n) => text.indexOf(n) >= 0);
 
 const WORKERS = [
+    // ── the four panels of Android 1.2.36 (cloud-panels.js) ─────────────────────────────────
+    // NETRA FIRST: it is a BPB fork and its code carries BPB's own markers (EMBEDED_SETTINGS,
+    // panelVersion:"5.1.1"), so if BPB were matched first, a Netra worker would be read as BPB and
+    // BPB's code would be offered onto it (seen on the maintainer's account, 2026-09-29).
+    // All four publish no version the store can compare, or a version line only on some builds, so
+    // they compare BY BYTES against the developer's newest code (store/worker-live.js): the
+    // deployed module, normalised, is either the same bytes or an update.
     {
-        id: 'bpb', kind: 'worker', group: 'workers', managedBy: 'windows',
+        id: 'netra', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'NTR',
+        title: 'پنل نترا',
+        upstream: { type: 'github', repo: 'netrair/netra-panel' },
+        detect: (t) => has(t, '_project_:"Netra"', 'SOURCE_CONTENT'),
+        versionOf: () => null,
+        compareBy: 'bytes',
+    },
+    {
+        id: 'gozargah', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'GZG',
+        title: 'پنل گذرگاه',
+        upstream: { type: 'github', repo: 'panelgozargah/gozargah' },
+        detect: (t) => has(t, 'GZ_DB', 'gozargah'),
+        versionOf: (t) => { const m = t.match(/VERSION\s*=\s*"([0-9][0-9.]*)"/); return m ? 'v' + m[1] : null; },
+        compareBy: 'bytes',
+    },
+    {
+        id: 'nova', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'NVA',
+        title: 'پنل نوا',
+        upstream: { type: 'github', repo: 'IRNova/Nova-Proxy' },
+        detect: (t) => has(t, 'IRNova', '/install/set', 'admin/sub-content'),
+        versionOf: () => null,
+        compareBy: 'bytes',
+    },
+    {
+        id: 'spider', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'SPD',
+        title: 'پنل اسپایدر',
+        upstream: { type: 'github', repo: 'amirh00sain/SpiderPanel' },
+        detect: (t) => has(t, 'SpiderPanel', 'SPIDER_KV', '/panel/config'),
+        versionOf: () => null,
+        compareBy: 'bytes',
+        // The deploy fills three placeholders (token, panel and worker domains). They are carried
+        // from the deployed copy into the new code, and put back as placeholders before comparing —
+        // EVERY occurrence, since the header comment names them too (the Android trap: restoring only
+        // the const lines made every install read as out of date).
+        transform: 'spider-injected',
+    },
+    // Nahan and the legacy MLM panel (cloud-panels.js, NHN / MLM). Both are the same code whichever
+    // app deployed them, so either app may update one in place — only the code is replaced.
+    {
+        id: 'nahan', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'NHN',
+        title: 'پنل نهان',
+        upstream: { type: 'github', repo: 'itsyebekhe/nahan' },
+        detect: (t) => has(t, 'Project Nahan', 'CURRENT_VERSION'),
+        versionOf: (t) => (t.match(/CURRENT_VERSION = "([0-9][0-9.]*)"/) || [])[1] || null,
+    },
+    {
+        // The Config Studio engine answers the same panel API but migrates its own database and is
+        // updated from the phone (mlm-panel below) — never matched here.
+        id: 'mlm', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'MLM',
+        title: 'پنل MLM',
+        upstream: { type: 'github', repo: 'mlmvpn/mlmvpn_android' },
+        detect: (t) => has(t, 'GLOBAL_TRAFFIC_CACHE', 'panel_session', 'ADMIN_PASSWORD') && !has(t, 'STUDIO_API_VERSION'),
+        versionOf: () => null,
+        compareBy: 'bytes',
+        bundled: { file: 'cloudflare-worker/mlm/worker.js', version: null },
+    },
+    {
+        id: 'bpb', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'BPB',
         title: 'پنل BPB',
         upstream: { type: 'github', repo: 'bia-pain-bache/BPB-Worker-Panel' },
         detect: (t) => has(t, 'EMBEDED_SETTINGS', 'panelVersion:"'),
@@ -262,7 +391,7 @@ const WORKERS = [
         pin: null,
     },
     {
-        id: 'zeus', kind: 'worker', group: 'workers', managedBy: 'windows',
+        id: 'zeus', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'ZEU',
         title: 'پنل Zeus',
         upstream: { type: 'github', repo: 'panel-zeus/Z-E-U-S' },
         detect: (t) => has(t, 'PANEL_ZEUS', 'CURRENT_VERSION'),
@@ -282,7 +411,7 @@ const WORKERS = [
         },
     },
     {
-        id: 'edge', kind: 'worker', group: 'workers', managedBy: 'windows',
+        id: 'edge', kind: 'worker', group: 'workers', managedBy: 'windows', panel: 'EDG',
         title: 'پروکسی Edge',
         upstream: { type: 'github', repo: 'cmliu/edgetunnel' },
         detect: (t) => /const Version = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'/.test(t) && has(t, 'config_JSON'),
@@ -341,7 +470,21 @@ const WORKERS = [
         // checked signatures has neither this digest nor the line, and reads as version 0.
         knownHashes: { 'fc412f3eec08e9c796783611338823ef7d573ee038663b02f54aa1f01389af76': 2 },
         legacyVersion: 1,
-        bundled: { file: 'cloudflare-worker/gt-broker/worker.js', version: 2 },
+        // 3 (1.2.5): the signed /p/ passthrough the new GitHub Tunnel rides through Cloudflare.
+        // 4 (1.2.5): the same passthrough into the two stable tunnels (Workers VPC bindings). A
+        // content-only update keeps the bindings the app put on the Worker.
+        bundled: { file: 'cloudflare-worker/gt-broker/worker.js', version: 4 },
+        pin: null,
+    },
+    {
+        // The WARP registration relay (warp-id-relay.js): api.cloudflareclient.com through the user's
+        // own Worker, where Iran filters the direct route. The same file the Android app deploys.
+        id: 'warp-id', kind: 'worker', group: 'workers', managedBy: 'windows',
+        title: 'رلهٔ ثبت هویت وارپ',
+        upstream: { type: 'local' },
+        detect: (t) => has(t, "service: 'warp-id'", 'api.cloudflareclient.com'),
+        versionOf: () => 1,
+        bundled: { file: 'cloudflare-worker/warp-id/worker.js', version: 1 },
         pin: null,
     },
 
@@ -353,12 +496,6 @@ const WORKERS = [
         title: 'پنل MLM (کانفیگ استدیو)',
         detect: (t) => has(t, 'STUDIO_API_VERSION', 'STUDIO_ROUTE'),
         versionOf: (t) => Number((t.match(/STUDIO_API_VERSION\s*=\s*(\d+)/) || [])[1]) || null,
-    },
-    {
-        id: 'nahan', kind: 'worker', group: 'workers', managedBy: 'android',
-        title: 'پنل نهان',
-        detect: (t) => has(t, 'Project Nahan', 'CURRENT_VERSION'),
-        versionOf: (t) => (t.match(/CURRENT_VERSION = "([0-9][0-9.]*)"/) || [])[1] || null,
     },
     {
         id: 'vpngate-relay', kind: 'worker', group: 'workers', managedBy: 'android',
@@ -374,6 +511,15 @@ const WORKERS = [
     },
 ];
 
+/**
+ * The nine panels of the Cloud window («ابری»), in the order its account card lists them. Each is a
+ * product of its own in the store (store-manager.js › panelRows): the developer's newest published
+ * code, every copy deployed on the user's accounts, and one button that brings them all up to it.
+ * `panel` on each entry is the same code the account registry and the Cloud window use.
+ */
+const CLOUD_PANELS = ['bpb', 'edge', 'zeus', 'spider', 'netra', 'gozargah', 'nova', 'nahan', 'mlm']
+    .map((id) => WORKERS.find((w) => w.id === id));
+
 // ── the rest ─────────────────────────────────────────────────────────────────
 
 const OTHERS = [
@@ -381,6 +527,13 @@ const OTHERS = [
         id: 'vodi', kind: 'railway', group: 'workers',
         title: 'railway',
         upstream: { type: 'github', repo: 'Vodiwalker/vodiwalker_panel' },
+    },
+    {
+        // RVG Gateway (codebox) — deployed to the user's Railway straight from the developer's repo,
+        // unmodified (its licence permits running/deploying, forbids publishing modified copies).
+        id: 'rvg', kind: 'railway', group: 'workers',
+        title: 'RVG',
+        upstream: { type: 'github', repo: 'arvin341az-glitch/RVG' },
     },
     {
         id: 'mlmvpn', kind: 'app', group: 'app',
@@ -425,4 +578,4 @@ function appFile(rel) {
     return path.join(__dirname, '..', rel);
 }
 
-module.exports = { ITEMS, BY_ID, CORES, WORKERS, OTHERS, DATA, appFile };
+module.exports = { ITEMS, BY_ID, CORES, WORKERS, CLOUD_PANELS, OTHERS, DATA, appFile };

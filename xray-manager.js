@@ -268,7 +268,8 @@ function parseVmessUri(uri, cleanIp, cleanPort) {
         throw new Error('کانفیگ vmess خوانده نشد (base64/JSON نامعتبر)');
     }
 
-    const address = cleanIp || String(cfg.add || '').trim();
+    const original = String(cfg.add || '').trim().replace(/^\[|\]$/g, '');
+    const address = cleanIp ? String(cleanIp).replace(/^\[|\]$/g, '') : original;
     const port = parseInt(cleanPort || cfg.port, 10);
     const id = normalizeXrayId(String(cfg.id || '').trim());
     if (!address || !port || isNaN(port)) throw new Error('کانفیگ vmess آدرس یا پورت ندارد');
@@ -304,7 +305,10 @@ function parseVmessUri(uri, cleanIp, cleanPort) {
             fp: cfg.fp,
             alpn: cfg.alpn,
             serviceName: cfg.path,
-            address,
+            // The NAME the link was written for, not the clean IP it is dialled on: this is only
+            // the fallback for an empty sni/host, and with the IP there the core offered it as the
+            // server name and Cloudflare refused the handshake.
+            address: original || address,
             insecure: cfg['skip-cert-verify'],
         }),
         mux: { enabled: false, concurrency: 8 },
@@ -423,7 +427,11 @@ function parseVlessUri(uri, cleanIp, cleanPort) {
     // vless://uuid@host:port?query#name or trojan://password@host:port?query#name
     const url = new URL(uri);
     let uuid = url.username;
-    let address = url.hostname;
+    // `[2606:4700:…]` in a link, bare in the core's `address` field: URL keeps the brackets on
+    // `hostname`, and since the filtering of 2026-09-28 a Cloudflare IPv6 edge is often the only
+    // one that carries data (cf-family.js), so this is no longer a corner case.
+    const unbracket = (h) => String(h || '').replace(/^\[|\]$/g, '');
+    let address = unbracket(url.hostname);
     let port = parseInt(url.port);
 
     const protocol = uri.startsWith('trojan://') ? 'trojan' : 'vless';
@@ -453,7 +461,7 @@ function parseVlessUri(uri, cleanIp, cleanPort) {
     }
 
     // Replace with clean IP/Port if provided
-    if (cleanIp) address = cleanIp;
+    if (cleanIp) address = unbracket(cleanIp);
     if (cleanPort) port = parseInt(cleanPort);
     let security = (url.searchParams.get('security') || 'none').toLowerCase();
     // Harvested configs carry all sorts in this field ("false", "0", "auto"). The core
@@ -495,7 +503,7 @@ function parseVlessUri(uri, cleanIp, cleanPort) {
         throw new Error(`vless بدون TLS روی آدرس عمومی را هسته‌ی Xray قبول نمی‌کند — ${uri.slice(0, 40)}`);
     }
 
-    const sni = url.searchParams.get('sni') || url.hostname;
+    const sni = url.searchParams.get('sni') || unbracket(url.hostname);
     const type = url.searchParams.get('type') || 'tcp';
     // Same fatal-config trap as vmess above: an unknown or removed transport makes Xray
     // refuse the entire file, so it is rejected here as one bad node instead.
@@ -1293,9 +1301,11 @@ function stopXray() {
     // TUN first. It holds the machine's default route and forwards everything into Xray's
     // SOCKS port; killing Xray while that adapter is up points the whole system at a dead
     // proxy, and the user loses all internet with nothing on screen explaining why.
+    // Only a tunnel THIS engine carries — the same rule as stopXrayAsync below. Another
+    // feature's tunnel (the GitHub Tunnel's own gtcore, WARP) is not Xray's to take down.
     try {
         const tun = require('./tun-manager');
-        if (tun.isRunning()) tun.stopTun(() => {});
+        if (tun.isRunning() && tun.currentEngine() === 'xray.exe') tun.stopTun(() => {}, 'xray stopped');
     } catch (e) { /* must never prevent Xray from being stopped */ }
 
     try {

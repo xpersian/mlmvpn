@@ -53,7 +53,9 @@ t('a file that is not there is null', cores.locate(all, tree, 'nothing.exe') ===
         ['a target with no artifacts', xray, { version: '99.0.0', artifacts: [] }, /منتشر نشده/],
         ['an artifact with no digest', xray, { version: '99.0.0', artifacts: [{ name: 'x', urls: ['https://x/y'] }] }, /هش معتبر/],
         ['an artifact with a bogus digest', xray, { version: '99.0.0', artifacts: [{ name: 'x', sha256: 'zz', urls: ['https://x/y'] }] }, /هش معتبر/],
-        ['an artifact with a digest but nowhere to get it', xray, { version: '99.0.0', artifacts: [{ name: 'x', sha256: 'a'.repeat(64), urls: [] }] }, /هش معتبر/],
+        ['an artifact with a digest but nowhere to get it', xray, { version: '99.0.0', artifacts: [{ name: 'x', sha256: 'a'.repeat(64), urls: [] }] }, /نشانی دانلود/],
+        // A signer is the one other anchor — and only a signer: an empty one is no anchor at all.
+        ['an artifact with neither a digest nor a signer', xray, { version: '99.0.0', artifacts: [{ name: 'x', signedBy: '', urls: ['https://x/y'] }] }, /نه هش معتبر دارد و نه امضا/],
         ['a version that is not newer than what is installed', xray, { version: '0.0.1', artifacts: [{ name: 'x', sha256: 'a'.repeat(64), urls: ['https://x/y'] }] }, /جدیدتر نیست/],
     ];
     for (const [name, item, target, match] of tries) {

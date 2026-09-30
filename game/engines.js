@@ -142,6 +142,29 @@ function v2raySpec(node, { source = 'saved', index = 0 } = {}) {
  * real interruption, so it is opt-in, it is announced, and it runs last.
  */
 function githubTunnelSpec() {
+    // v2 (the Xray engine through the user's own Worker) is none of the above: its SOCKS port
+    // carries UDP as XUDP inside the WebSocket, so it is started as a bare engine, measured through
+    // that port and routed per process like any other — nothing machine-wide. Which one a start
+    // would use is the LIVE session's: a v2 race needs a session that is already up, because
+    // bringing a runner up costs minutes and the account's allowance.
+    let v2 = false;
+    try {
+        const s = require('../github-tunnel/gt-deployer').activeSession();
+        v2 = !!(s && s.dataPlane === 'v2');
+    } catch (e) { /* no session store — v1's spec */ }
+    if (v2) {
+        return {
+            id: 'github-tunnel',
+            kind: 'github-tunnel',
+            fa: 'تونل GitHub',
+            socksPort: GT_SOCKS,
+            processName: 'gtcore.exe',
+            exclusive: false,
+            // Clean-IP pick (cached per network) + the core's own verification.
+            startupMs: 45000,
+            why: 'سرور خودت روی گیت‌هاب، از مسیر کلادفلر؛ UDP را داخل همان اتصال می‌برد (با تأخیر TCP)',
+        };
+    }
     return {
         id: 'github-tunnel',
         kind: 'github-tunnel',
@@ -305,7 +328,7 @@ async function ensure(spec, drivers, { log = () => {}, signal = null } = {}) {
         log(`روشن کردن ${spec.fa}`);
         await drivers.startV2ray(spec.node);
     } else if (spec.kind === 'github-tunnel') {
-        log(`روشن کردن ${spec.fa} (حالت تونل کامل)`);
+        log(spec.exclusive ? `روشن کردن ${spec.fa} (حالت تونل کامل)` : `روشن کردن ${spec.fa}`);
         await drivers.startGithubTunnel();
     } else if (spec.kind === 'geph') {
         log(`روشن کردن ${spec.fa}`);
@@ -316,9 +339,10 @@ async function ensure(spec, drivers, { log = () => {}, signal = null } = {}) {
 
     current = { specId: spec.id, kind: spec.kind };
 
-    // The GitHub Tunnel owns the route rather than a SOCKS port, and its own connect call
-    // does not return until the tunnel is up — so there is nothing left to wait for.
-    if (spec.kind !== 'github-tunnel') {
+    // v1's GitHub Tunnel owns the route rather than a SOCKS port, and its own connect call
+    // does not return until the tunnel is up — so there is nothing left to wait for. v2 is a
+    // SOCKS engine like the rest (its connect also returns only once data passes).
+    if (!spec.exclusive) {
         const up = await waitForPort(spec.socksPort, spec.startupMs, signal);
         if (!up) {
             await release(spec, drivers, { started: true, log });

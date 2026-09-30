@@ -90,7 +90,11 @@ async function check() {
             body: String(j.body || '').slice(0, 8000),
             publishedAt: j.published_at || '',
             newer: compare(version, currentVersion()) > 0,
-            asset: asset ? { name: asset.name, size: asset.size, url: asset.browser_download_url } : null,
+            // GitHub computes a SHA-256 for every uploaded asset (`digest: "sha256:…"`). It is what
+            // tells a complete installer from a truncated one: a user reported «NSIS Error», which is
+            // NSIS's own integrity check failing on a file cut short on a bad line.
+            asset: asset ? { name: asset.name, size: asset.size, url: asset.browser_download_url,
+                sha256: (/^sha256:([0-9a-f]{64})$/i.exec(String(asset.digest || '')) || [])[1] || null } : null,
         };
         persist({ lastCheckAt: Date.now() });
     } catch (e) {
@@ -148,8 +152,12 @@ async function download() {
         }
         if (stalled) throw new Error('دانلود یک دقیقه جلو نرفت و متوقف شد');
         if (l.asset.size && state.download.bytes !== l.asset.size) throw new Error('دانلود پیش از کامل شدن فایل قطع شد');
+        if (l.asset.sha256) {
+            const got = await sha256File(part);
+            if (got !== l.asset.sha256.toLowerCase()) throw new Error('فایل دانلودشده با امضای گیت‌هاب یکی نیست (خراب رسیده) — دوباره دانلود کنید');
+        }
         fs.renameSync(part, target);
-        persist({ downloadedFile: target, downloadedVersion: l.version });
+        persist({ downloadedFile: target, downloadedVersion: l.version, downloadedSha256: l.asset.sha256 || null, downloadedSize: l.asset.size || null });
         state.download = { running: false, bytes: state.download.bytes, total: state.download.total, done: true };
     } catch (e) {
         try { fs.unlinkSync(part); } catch (x) { /* nothing written */ }
@@ -173,9 +181,27 @@ function startDownload() {
  * The installer runs, and the app gets out of its way; the portable build's new exe is shown in
  * Explorer, since a portable app is replaced by the user, not by an installer.
  */
-function install() {
+function sha256File(file) {
+    return new Promise((resolve, reject) => {
+        const h = require('crypto').createHash('sha256');
+        fs.createReadStream(file).on('data', (c) => h.update(c)).on('error', reject).on('end', () => resolve(h.digest('hex')));
+    });
+}
+
+async function install() {
     const d = downloadedFile();
     if (!d) throw new Error('فایل به‌روزرسانی دانلود نشده است.');
+    // Checked again right before it runs: a file that has sat on disk may have been touched by an
+    // antivirus or a disk error, and NSIS answers a damaged installer with a bare «NSIS Error».
+    const s = saved();
+    try {
+        if (s.downloadedSize && fs.statSync(d.file).size !== s.downloadedSize) throw new Error('size');
+        if (s.downloadedSha256 && (await sha256File(d.file)) !== String(s.downloadedSha256).toLowerCase()) throw new Error('sha');
+    } catch (e) {
+        try { fs.unlinkSync(d.file); } catch (x) { /* gone */ }
+        persist({ downloadedFile: null, downloadedVersion: null });
+        throw new Error('فایل نصب دانلودشده سالم نیست و پاک شد — دوباره «دانلود» را بزنید.');
+    }
     let electron = null;
     if (process.versions && process.versions.electron) { try { electron = require('electron'); } catch (e) { electron = null; } }
     if (/Portable/i.test(path.basename(d.file))) {

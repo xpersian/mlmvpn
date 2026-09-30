@@ -48,10 +48,13 @@ function write() {
     } catch (e) { /* a cache that cannot be written is still a cache in memory */ }
 }
 
-/** The version inside a tag: `v2.0.0` → `2.0.0`, `geph5-client-v0.3.10` → `0.3.10` (item.tagRe). */
+/**
+ * The version inside a tag: `v2.0.0` → `2.0.0`, `geph5-client-v0.3.10` → `0.3.10` (item.tagRe).
+ * A tagRe with several groups joins them: SoftEther's `v4.44-9807-rtm` → `4.44.9807`.
+ */
 function versionOf(item, tag) {
     const re = item.upstream && item.upstream.tagRe ? new RegExp(item.upstream.tagRe) : null;
-    const v = re ? ((String(tag).match(re) || [])[1] || '') : String(tag).replace(/^v/i, '');
+    const v = re ? (String(tag).match(re) || []).slice(1).filter(Boolean).join('.') : String(tag).replace(/^v/i, '');
     return /[0-9]/.test(v) ? v : '';
 }
 

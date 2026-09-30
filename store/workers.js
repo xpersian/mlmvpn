@@ -125,13 +125,67 @@ function bundledSource(item) {
     return text;
 }
 
-/** version + how to get the code the store would deploy for `item`: pinned channel, or the bundle. */
+/**
+ * version + how to get the code the store would deploy for `item`: the developer's NEWEST published
+ * code when it has been read (store/worker-live.js) and is newer, else the pinned channel, else the
+ * bundle. Users asked for exactly this (2026-09-29): every panel always the developer's latest.
+ */
 function target(item) {
+    let base = null;
     if (item.pin && item.pin.version) {
-        return { version: item.pin.version, notes: item.pin.notes || '', from: 'pin', artifact: item.pin.artifacts && item.pin.artifacts[0] };
+        base = { version: item.pin.version, notes: item.pin.notes || '', from: 'pin', artifact: item.pin.artifacts && item.pin.artifacts[0] };
+    } else if (item.bundled) base = { version: item.bundled.version, notes: '', from: 'bundle' };
+    let live = null;
+    try { live = require('./worker-live').peek(item.id); } catch (e) { live = null; }
+    if (live && live.code && live.version) {
+        const c = base ? versions.compare(live.version, base.version) : 1;
+        // At the SAME number the developer's copy wins too: an update installs what their GitHub
+        // publishes, not the copy this build happens to carry (2026-10-01).
+        if (!base || c === null || c >= 0) {
+            return { version: live.version, notes: 'آخرین نسخهٔ منتشرشدهٔ سازنده (' + live.repo + ' @ ' + live.ref + ')', from: 'live' };
+        }
     }
-    if (item.bundled) return { version: item.bundled.version, notes: '', from: 'bundle' };
-    return null;
+    return base;
+}
+
+// ── panels compared BY BYTES (catalog › compareBy: 'bytes') ─────────────────────
+
+const SPIDER_NAMES = ['PANEL_TOKEN', 'PANEL_DOMAIN', 'WORKER_DOMAIN'];
+/** The raw JS literals a deployed Spider carries for its three injected constants, or null. */
+function spiderValues(text) {
+    const out = {};
+    for (const n of SPIDER_NAMES) {
+        const m = new RegExp('const\\s+' + n + '\\s*=\\s*([^;\\n]+);').exec(text);
+        if (!m || m[1].trim().startsWith('"__')) return null;
+        out[n] = m[1].trim();
+    }
+    return out;
+}
+/** The code as the developer published it: BOM off, Spider's injected values back as placeholders. */
+function normalizeFor(item, text) {
+    let t = String(text || '');
+    if (t.charCodeAt(0) === 0xfeff) t = t.slice(1);
+    if (item.transform === 'spider-injected') {
+        const v = spiderValues(t);
+        if (v) for (const n of SPIDER_NAMES) t = t.split(v[n]).join(`__${n}__`);
+    }
+    return t.replace(/\s+$/, '');
+}
+const sha = (t) => require('crypto').createHash('sha256').update(t, 'utf8').digest('hex');
+/** For a bytes-compared panel: { same, live } against the developer's newest code, or null. */
+function bytesState(item, deployedBody) {
+    let live = null;
+    try { live = require('./worker-live').peek(item.id); } catch (e) { live = null; }
+    if (!live || !live.code) return null;
+    return { same: sha(normalizeFor(item, deployedBody)) === sha(normalizeFor(item, live.code)), live };
+}
+
+/** Read every Windows-managed panel's newest upstream code once, before a survey compares. */
+async function refreshLive() {
+    let live;
+    try { live = require('./worker-live'); } catch (e) { return; }
+    const ids = WORKERS.filter((w) => w.managedBy === 'windows' && live.SOURCES[w.id]).map((w) => w.id);
+    await Promise.all(ids.map((id) => live.latest(id).catch(() => null)));
 }
 
 /** -1/0/1/null comparing a deployed worker version to the store's target for it. */
@@ -153,6 +207,7 @@ function compareToTarget(item, deployed) {
  * Unrecognised scripts are omitted entirely — they are the user's own, and not the store's business.
  */
 async function survey(acc, { onProgress } = {}) {
+    await refreshLive();
     const id = await accountId(acc);
     const scoped = Object.assign({}, acc, { _accountId: id });
     const list = (await axios.get(API + '/accounts/' + id + '/workers/scripts', { headers: headersFor(acc), timeout: 20000 })).data;
@@ -172,6 +227,23 @@ async function survey(acc, { onProgress } = {}) {
         if (!body) continue;
         const hit = classify(body.body);
         if (!hit) continue;   // the user's own worker — invisible to the store, on purpose
+        if (hit.item.compareBy === 'bytes') {
+            const b = bytesState(hit.item, body.body);
+            out.push({
+                id: hit.item.id, title: hit.item.title, script: name, mainModule: body.name,
+                managedBy: hit.item.managedBy, modifiedOn: scripts[i].modified_on || '',
+                deployedVersion: hit.version, targetVersion: b ? b.live.version : null,
+                url: sub ? 'https://' + name + '.' + sub + '.workers.dev' : '',
+                state: !b ? 'unknown' : b.same ? 'current' : 'update',
+                updatable: !!(b && !b.same),
+                notes: b ? 'آخرین کد منتشرشدهٔ سازنده (' + b.live.repo + ' @ ' + b.live.ref + ')' : '',
+                // WHICH developer code this comparison was made against. When the developer publishes
+                // again, the store sees a different digest and knows «current» is stale without
+                // reading every Worker on the account again (store-manager.js › reassess).
+                liveSha: b ? (b.live.sha256 || sha(b.live.code)) : null,
+            });
+            continue;
+        }
         const t = target(hit.item);
         const cmp = hit.item.managedBy === 'windows' ? compareToTarget(hit.item, hit.version) : null;
         out.push({
@@ -269,7 +341,11 @@ async function codeFor(item, deployedBody) {
     const t = target(item);
     if (!t) throw new Error('برای این ورکر نسخه‌ای تعریف نشده است.');
     let code;
-    if (t.from === 'pin') {
+    if (t.from === 'live') {
+        const live = require('./worker-live').peek(item.id);
+        if (!live || !live.code) throw new Error('کد تازهٔ سازنده دیگر در دسترس نیست — دوباره تلاش کنید.');
+        code = live.code;
+    } else if (t.from === 'pin') {
         const a = t.artifact;
         if (!a || !trust.isSha256(a.sha256)) throw new Error('نسخهٔ پین‌شدهٔ این ورکر هش معتبر ندارد.');
         const netio = require('./net');
@@ -376,6 +452,7 @@ async function rollback(acc, scriptName) {
  * to manage, verifies the target version really is newer, and replaces only the code.
  */
 async function update(acc, scriptName, { expectId } = {}) {
+    await refreshLive();
     const id = await accountId(acc);
     const scoped = Object.assign({}, acc, { _accountId: id });
     const body = await fetchScript(scoped, id, scriptName);
@@ -387,6 +464,23 @@ async function update(acc, scriptName, { expectId } = {}) {
     }
     if (hit.item.managedBy !== 'windows') {
         throw new Error('«' + hit.item.title + '» را برنامهٔ اندروید مستقر کرده و از همان‌جا بروزرسانی می‌شود.');
+    }
+    if (hit.item.compareBy === 'bytes') {
+        const b = bytesState(hit.item, body.body);
+        if (!b) throw new Error('کد تازهٔ سازنده خوانده نشد — اینترنت را بررسی کنید و دوباره امتحان کنید.');
+        if (b.same) throw new Error('همین حالا آخرین کد سازنده روی آن است.');
+        let code = b.live.code.charCodeAt(0) === 0xfeff ? b.live.code.slice(1) : b.live.code;
+        if (hit.item.transform === 'spider-injected') {
+            const v = spiderValues(body.body);
+            if (!v) throw new Error('توکن و دامنه‌های نصب‌شدهٔ اسپایدر خوانده نشد — بروزرسانی نشد.');
+            for (const n of SPIDER_NAMES) {
+                if (!code.includes(`__${n}__`)) throw new Error(`کد تازهٔ اسپایدر دیگر جای «${n}» را ندارد — بروزرسانی نشد.`);
+                code = code.split(`__${n}__`).join(v[n]);
+            }
+        }
+        const backup = saveBackup(acc.id, scriptName, body, { version: hit.version, item: hit.item.id, to: b.live.version });
+        await putContent(scoped, id, scriptName, body.name, code);
+        return { id: hit.item.id, title: hit.item.title, from: hit.version, to: b.live.version, confirmed: null, script: scriptName, backup };
     }
     const cmp = compareToTarget(hit.item, hit.version);
     if (cmp === null) throw new Error('نسخهٔ این ورکر خوانده نشد.');
@@ -421,7 +515,7 @@ async function update(acc, scriptName, { expectId } = {}) {
 }
 
 module.exports = {
-    bpbPrefix, stripBpbPrefix, backups, rollback, saveBackup,
-    survey, update, classify, target, compareToTarget, fetchScript, codeFor,
+    bpbPrefix, stripBpbPrefix, backups, rollback, saveBackup, spiderValues, normalizeFor, bytesState,
+    survey, update, classify, target, compareToTarget, withinFloor, fetchScript, codeFor,
     headersFor, accountId, bundledSource,
 };

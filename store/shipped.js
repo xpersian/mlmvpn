@@ -94,6 +94,23 @@ const SHIPPED = {
         version: '1.9.36', dir: '',
         files: { 'gst.exe': 'ac7cec11b2b66d548be9502fe132454ef3be8909094acf27378736194631b147' },
     },
+    softether: {
+        // SoftEther VPN Client 4.44 build 9807 (rtm, compiled 2025-04-16) — the newest stable on
+        // SoftEtherVPN/SoftEtherVPN_Stable as of 2026-09-22. The executables carry SoftEther
+        // Corporation's Authenticode signature; lang.config is SoftEther's own file with `en`, which
+        // keeps vpncmd's output in the English the gateway parses. Added 2026-09-22, when the client
+        // stopped being something the user had to install (gateway-manager.js › provisionClient).
+        version: '4.44.9807', dir: 'softether',
+        files: {
+            'vpnclient_x64.exe': '58e64e25ba2e9d155ca6950de03b2c4b2c2a88e2f742cd53ddb96e9abda2fbb5',
+            'vpncmd_x64.exe': '6b006be36e081d42f3ecccfb237e06505542aaad807cc7520aaeaf3e7125e022',
+            'vpnclient.exe': '6b1360724373bd1666a31f72dfe9c466931acee37dbec36a4e0608396dfed095',
+            'vpncmd.exe': 'd09745d77b02b077384af4f56a1d6a03b7ed9dd8cbe2fe26cd07d822cfe3cab0',
+            'hamcore.se2': 'ef14f333cce4ed853ccde0075142851e9258040a4e794b13113f8f192556ad16',
+            'lang.config': '198a807286efe5d84bcccd01ca6d2e4b71dd0b4024919406395483117b745b81',
+            'LICENSE.txt': '5da6241ddb987c4543bf1cbba6b40a3cd3ecb624dbd4a63daf04440911656bde',
+        },
+    },
     tailscale: {
         version: '1.102.2', dir: 'tailscale',
         files: {

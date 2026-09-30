@@ -81,7 +81,7 @@ t('it waits for the adapter to exist and own the default route',
 t('the liveness check asks Windows, not our own bookkeeping',
     /Get-NetAdapter -Name/.test(tunMgr) && /Get-NetRoute -DestinationPrefix/.test(tunMgr));
 t('a failed start does not leave a half-started engine holding the route',
-    /if \(!ready\.ok\) \{[\s\S]{0,900}?stopTun\(null\)/.test(tunMgr));
+    /if \(!ready\.ok\) \{[\s\S]{0,900}?stopTun\(null[,)]/.test(tunMgr));
 
 // ── teardown must leave the machine routable ─────────────────────────────────────
 t('stopTun asks politely before forcing, so sing-box can unwind its own changes',

@@ -63,10 +63,37 @@ const PAGE_SIZE = 60;
 const MIN_PAGE = 4;
 
 const DEFAULT_PROBE_URL = 'https://clients3.google.com/generate_204';
-// Throughput is measured against Cloudflare's own sink, because that is where these configs
-// come out anyway: a number from anywhere else would describe a path the user will never take.
-// 1.5 MB is enough to leave TCP slow-start behind and short enough that fifty nodes finish.
-const DEFAULT_SPEED_URL = 'https://speed.cloudflare.com/__down?bytes=1500000';
+// THROUGHPUT IS MEASURED AGAINST A DOWNLOAD THAT IS NOT ON CLOUDFLARE.
+//
+// It used to be speed.cloudflare.com, on the theory that these configs come out at Cloudflare
+// anyway. For a config that runs ON a Cloudflare Worker — everything «زیرساخت ابری» makes — it
+// is the one destination guaranteed to be wrong:
+//   * the Edge panel's worker never forwards speed.cloudflare.com (or cp.cloudflare.com) at
+//     all (edgeworker.js › isSpeedTestSite). It waits for a plain-HTTP request and answers a
+//     local «204 No Content»; an https request never gets its TLS answer and hangs to the cap.
+//     Measured through a live Edge config and clean IP on 2026-09-22: delay 146 ms, CacheFly
+//     1744 KB/s, speed.cloudflare.com −1 after 9 s — every node, every time. That is the whole
+//     of «اندازه‌گیری سرعت واقعی» cycling forever in the assistant with nothing confirmed;
+//   * every other worker cannot connect() to a Cloudflare address and detours through its
+//     proxy IP, so the number describes the proxy IP rather than the path. Same BPB config,
+//     same clean IP: 744 KB/s from speed.cloudflare.com, 1938 KB/s from the file below.
+// So the file is Google's own download server — outside Cloudflare, next to every Cloudflare
+// edge, and the worker reaches it directly from whichever edge the clean IP landed on: the part
+// of the path that actually differs from one clean IP to the next. It honours the Range header
+// (206, exactly the bytes asked for), and the URL has been stable for over a decade.
+// NOT CacheFly, v2rayN's default, although it was the first thing tried: through a worker its
+// 10 MB and 100 MB test files come back as a 7-byte «100mb» placeholder (text/html, 200) —
+// it evidently refuses datacenter addresses. Only its 1 MB file still passed on 2026-09-22.
+// Plain HTTP on purpose: the tunnel already encrypts it, and no TLS has to be layered onto the
+// SOCKS socket (see realSpeed).
+const DEFAULT_SPEED_URL = 'http://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb';
+// How much to read. The file is bigger on purpose: the request asks for exactly this much with
+// a Range header, and the reader stops here even when a server ignores the range. 1.5 MB is
+// enough to leave TCP slow-start behind and short enough that a page of nodes finishes.
+const SPEED_BYTES = 1500000;
+// Less than this is an error page, a placeholder or an intercepted request, not a transfer —
+// a worker answering «204», or CacheFly's 7-byte «100mb», must not come out as a fast node.
+const SPEED_MIN_BYTES = 32 * 1024;
 const SPEED_CAP_MS = 12000;
 
 const userDir = () => {
@@ -99,18 +126,37 @@ function portIsFree(port) {
  * guess: the ports Windows has RESERVED (its Hyper-V/WinNAT exclusions) and the ports this
  * app itself is using are refused by bind and skipped here, permanently.
  */
+// Ports handed to a core in THIS process stay claimed until that core is done. A port is released
+// the instant before xray binds it (runPage), so two tests started together from the same base —
+// the arena qualifies up to nine at once — found the same "free" port; the second core then either
+// died or, worse, its first probe reached the OTHER core and read that config's result
+// (measured 2026-09-29: panels knocked out as «unreachable» whose configs carried data).
+const claimed = new Map();   // port → claim expiry (a safety net for a claim never given back)
+const CLAIM_MS = 120000;
+function isClaimed(port) {
+    const until = claimed.get(port);
+    if (!until) return false;
+    if (until < Date.now()) { claimed.delete(port); return false; }
+    return true;
+}
+function unclaim(ports) { for (const p of ports || []) claimed.delete(p); }
+
 async function reservePorts(count, startAt = BASE_PORT) {
     const held = [];
     const ports = [];
     let port = startAt;
     while (ports.length < count && port < MAX_PORT) {
-        const srv = await portIsFree(port);
-        if (srv) { held.push(srv); ports.push(port); }
+        if (!isClaimed(port)) {
+            claimed.set(port, Date.now() + CLAIM_MS);   // before the await: a parallel caller skips it
+            const srv = await portIsFree(port);
+            if (srv) { held.push(srv); ports.push(port); } else claimed.delete(port);
+        }
         port++;
     }
     const release = () => Promise.all(held.map(s => new Promise(r => s.close(r))));
     if (ports.length < count) {
         await release();
+        unclaim(ports);
         throw new Error(`هیچ پورت آزادی برای تست پیدا نشد (از ${startAt} تا ${MAX_PORT})`);
     }
     return { ports, release, next: port };
@@ -145,8 +191,12 @@ function waitForPort(port, budgetMs = 6000) {
 function tcpPing(address, port, timeoutMs = 5000) {
     return new Promise((resolve) => {
         if (!address || !port) return resolve(-1);
-        // IPv6 is not reachable on most Iranian connections and a hang here costs a slot.
-        if (String(address).includes(':')) return resolve(-1);
+        // IPv6 only when this machine has a route for it — without one a hang costs a slot. Since
+        // the filtering of 2026-09-28 a Cloudflare IPv6 address is often the only one that works,
+        // so it can no longer be written off wholesale (cf-family.js).
+        const bare = String(address).replace(/^\[|\]$/g, '');
+        if (bare.includes(':') && !require('./cf-family').hasIpv6RouteNow()) return resolve(-1);
+        address = bare;
         const started = Date.now();
         const sock = new net.Socket();
         sock.setTimeout(timeoutMs);
@@ -177,8 +227,13 @@ function tcpPing(address, port, timeoutMs = 5000) {
  * Bytes are counted from the FIRST byte of the body, not from the request: otherwise the
  * connect and the TLS handshake are charged to the transfer and a distant node is punished
  * twice for the same distance.
+ *
+ * The cap is on the WHOLE measurement, not on silence. The old `req.setTimeout` was an idle
+ * timer, so a node trickling a few KB a second held its slot until all 1.5 MB had arrived. Now
+ * a node still sending at the cap is scored on what it managed — it works, it is just slow, and
+ * a slow working node is not the same answer as a dead one.
  */
-async function realSpeed(socksPort, speedUrl, { log = () => {} } = {}) {
+async function realSpeed(socksPort, speedUrl, { log = () => {}, bytes: want = SPEED_BYTES, capMs = SPEED_CAP_MS } = {}) {
     let url = null;
     try { url = new URL(speedUrl); } catch (e) { return { val: -1, reason: 'probe-url' }; }
 
@@ -187,8 +242,25 @@ async function realSpeed(socksPort, speedUrl, { log = () => {} } = {}) {
 
     const out = await new Promise((resolve) => {
         let settled = false;
-        const finish = (val, reason) => { if (!settled) { settled = true; resolve({ val, reason }); } };
-        const req = (isTls ? https : http).request({
+        let got = 0;
+        let first = 0;
+        let req = null;
+        let cap = null;
+        const rate = () => {
+            const ms = first ? (Date.now() - first) : 0;
+            return ms > 0 ? Math.max(1, Math.round((got / 1024) / (ms / 1000))) : -1;
+        };
+        const finish = (val, reason) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(cap);
+            // Enough was read, or the node is done for: stop the transfer rather than let the
+            // rest of a large file stream into a socket nobody is reading.
+            try { if (req) req.destroy(); } catch (e) {}
+            resolve({ val, reason });
+        };
+        const scored = () => { const v = rate(); finish(v, v > 0 ? undefined : 'short'); };
+        req = (isTls ? https : http).request({
             host: url.hostname,
             port: url.port || (isTls ? 443 : 80),
             path: (url.pathname || '/') + (url.search || ''),
@@ -198,24 +270,29 @@ async function realSpeed(socksPort, speedUrl, { log = () => {} } = {}) {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': '*/*',
                 'Cache-Control': 'no-cache',
+                // Ask for exactly what will be read…
+                'Range': `bytes=0-${want - 1}`,
             },
         }, (response) => {
             const code = response.statusCode || 0;
+            // 206 answers the Range; 200 is a server that ignored it and sends the whole file.
             if (!(code >= 200 && code < 300)) { response.resume(); return finish(-1, 'http-' + code); }
-            let bytes = 0;
-            let first = 0;
             response.on('data', (d) => {
                 if (!first) first = Date.now();
-                bytes += d.length;
+                got += d.length;
+                // …and stop there even if the whole file is coming.
+                if (got >= want) scored();
             });
             response.on('end', () => {
-                const ms = first ? (Date.now() - first) : 0;
-                if (!bytes || ms <= 0) return finish(-1, 'empty');
-                finish(Math.max(1, Math.round((bytes / 1024) / (ms / 1000))));
+                if (got < SPEED_MIN_BYTES) return finish(-1, got ? 'short' : 'empty');
+                scored();
             });
             response.on('error', (e) => finish(-1, e.message));
         });
-        req.setTimeout(SPEED_CAP_MS, () => { try { req.destroy(); } catch (e) {} finish(-1, 'timeout'); });
+        cap = setTimeout(() => {
+            if (got >= SPEED_MIN_BYTES) scored();
+            else finish(-1, 'timeout');
+        }, capMs);
         req.on('error', (err) => finish(-1, err.message));
         req.end();
     });
@@ -301,6 +378,12 @@ const isSanctionedTarget = (u) => !!u && SANCTIONED.some(s => String(u).includes
  * come up, which says nothing about the nodes and is the caller's cue to halve the page.
  */
 async function runPage(page, opts) {
+    let heldPorts = null;
+    try { return await runPageInner(page, opts, (p) => { heldPorts = p; }); }
+    finally { unclaim(heldPorts); }
+}
+
+async function runPageInner(page, opts, onPorts) {
     const { probeUrl, concurrency, isAborted, log, onResult } = opts;
     // 'delay' → milliseconds (lower is better) · 'speed' → KB/s (higher is better).
     const mode = opts.mode === 'speed' ? 'speed' : 'delay';
@@ -317,6 +400,7 @@ async function runPage(page, opts) {
         return { ok: false, reason: 'ports' };
     }
     const ports = reserved.ports;
+    onPorts(ports);
 
     const inbounds = [];
     const outbounds = [];
@@ -331,7 +415,9 @@ async function runPage(page, opts) {
     });
 
     const dir = userDir();
-    const configPath = path.join(dir, `config_test${page.length === 1 ? '_solo' : ''}.json`);
+    // One file per run: tests running side by side each wrote the same config_test_solo.json, and a
+    // core could start on its neighbour's config.
+    const configPath = path.join(dir, `config_test_${ports[0]}_${page.length}.json`);
     const config = {
         log: { loglevel: 'warning' },
         inbounds,
@@ -409,6 +495,7 @@ async function runPage(page, opts) {
     await Promise.all(Array.from({ length: lanes }, worker));
 
     kill();
+    try { fs.unlinkSync(configPath); } catch (e) { /* the next run overwrites it */ }
     return { ok: true, results };
 }
 
@@ -435,6 +522,7 @@ async function testNodes({
     isAborted = () => false,
     log = () => {},
     timings = {},
+    basePort = BASE_PORT,
 } = {}) {
     const { parseVlessUri } = require('./xray-manager');
 
@@ -492,7 +580,7 @@ async function testNodes({
         for (let i = 0; i < list.length; i += pageSize) {
             if (isAborted()) return;
             const page = list.slice(i, i + pageSize);
-            const r = await runPage(page, { probeUrl, concurrency, isAborted, log, onResult: emit, portBudgetMs: timings.portBudgetMs, mode: speedMode ? 'speed' : 'delay' });
+            const r = await runPage(page, { probeUrl, concurrency, isAborted, log, onResult: emit, portBudgetMs: timings.portBudgetMs, mode: speedMode ? 'speed' : 'delay', basePort });
             if (!r.ok) failed.push(...page);
         }
         if (!failed.length || isAborted()) return;
@@ -507,7 +595,7 @@ async function testNodes({
         log(`[Test] ${failed.length} کانفیگ با هسته‌ی جداگانه تست می‌شوند`);
         for (const node of failed) {
             if (isAborted()) return;
-            const r = await runPage([node], { probeUrl, concurrency: 1, isAborted, log, onResult: emit, portBudgetMs: timings.portBudgetMs, mode: speedMode ? 'speed' : 'delay' });
+            const r = await runPage([node], { probeUrl, concurrency: 1, isAborted, log, onResult: emit, portBudgetMs: timings.portBudgetMs, mode: speedMode ? 'speed' : 'delay', basePort });
             if (!r.ok) {
                 coreFailures++;
                 emit({ id: node.id, val: -1, reason: 'core' });
@@ -519,9 +607,36 @@ async function testNodes({
     return { results, coreFailures };
 }
 
+/**
+ * The real delay of each link, in the order given (ms, or -1), within `timeoutMs` overall — for
+ * the self-healing layer (cf-family / cf-edge-heal), which has to decide in seconds whether a
+ * family carries data. Its own port range, so it never collides with a delay test the user is
+ * running at the same moment.
+ */
+async function measureUris(uris, { timeoutMs = 10000, basePort = 26000, log = () => {}, probeUrl = null, mode = 'delay' } = {}) {
+    const out = uris.map(() => -1);
+    if (!uris.length) return out;
+    let stop = false;
+    const run = testNodes({
+        nodes: uris.map((uri, i) => ({ id: i, uri })),
+        // 'speed' answers KB/s (higher is better); 'delay' ms. `probeUrl` replaces the default target.
+        testType: mode === 'speed' ? 'speed' : 'delay',
+        settings: Object.assign({ concurrency: mode === 'speed' ? 1 : uris.length }, probeUrl ? { pingUrl: probeUrl } : {}),
+        basePort,
+        isAborted: () => stop,
+        log,
+        onResult: (r) => { if (typeof r.id === 'number' && r.val > 0) out[r.id] = r.val; },
+    }).catch(() => {});
+    let timer = null;
+    await Promise.race([run, new Promise((r) => { timer = setTimeout(r, timeoutMs); })]);
+    clearTimeout(timer);
+    stop = true;
+    return out.slice();
+}
+
 module.exports = {
-    testNodes,
+    testNodes, measureUris,
     // exported for the tests and for anything that wants one of the pieces
-    reservePorts, waitForPort, tcpPing, realPing, portIsFree,
-    BASE_PORT, PAGE_SIZE, MIN_PAGE, DEFAULT_PROBE_URL, DEFAULT_SPEED_URL,
+    reservePorts, waitForPort, tcpPing, realPing, realSpeed, portIsFree,
+    BASE_PORT, PAGE_SIZE, MIN_PAGE, DEFAULT_PROBE_URL, DEFAULT_SPEED_URL, SPEED_BYTES, SPEED_MIN_BYTES,
 };

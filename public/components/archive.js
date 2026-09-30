@@ -427,7 +427,7 @@ async function retestArchiveNodes() {
     const dummyConfigs = nodesToTest.map((node, i) => {
         let modified = firstConfig.trim();
         // Replace IP and Port
-        modified = modified.replace(/@([a-zA-Z0-9.-]+):(\d+)/, "@" + node.ip + ":" + node.port);
+        modified = window.CfUri.rewrite(modified, node.ip, node.port);   // IPv6-aware (cf-uri.js)
         // Append archive tag
         modified = modified.replace(/#.*/, "#Archive-" + i);
         if (!modified.includes('#')) modified += "#Archive-" + i;

@@ -20,8 +20,10 @@
  * `docs/` and the memory), and it is genuinely the lightest thing that works; it is simply four to
  * six times too slow to offer as a headline feature.
  *
- * The client is Apache-2.0, so bundling its installer is allowed. This module uses whichever
- * installation is present and never touches the user's own connection settings: everything it
+ * The client is Apache-2.0, so it SHIPS with the app (core/softether, with its licence). This
+ * module uses whichever installation is present; on a machine with none, the first connect
+ * installs the shipped copy as the client service (provisionClient) — the user is never sent to
+ * find SoftEther themselves. It never touches the user's own connection settings: everything it
  * creates is named [ACCOUNT] and is deleted again on stop.
  *
  * ## What it does NOT do
@@ -66,19 +68,121 @@ const DATA_DIR = path.join(os.homedir(), '.mlmvpn', 'gateway');
 
 /** The shipped seed list, and the updated copy that supersedes it once one has been fetched. */
 function seedPath() { return require('./core-paths').bundled('core', 'vpngate_servers.csv'); }
+/**
+ * When the shipped list was fetched (core/vpngate_servers.date.json, written with it). A file's
+ * mtime is the install's, not the list's — the panel then called a months-old list «today».
+ */
+function seedDate() {
+    try { return Number(JSON.parse(fs.readFileSync(require('./core-paths').bundled('core', 'vpngate_servers.date.json'), 'utf8')).fetchedAt) || null; }
+    catch (e) { return null; }
+}
 function livePath() { return path.join(DATA_DIR, 'servers.csv'); }
 
+/** The Windows service the client runs as. SoftEther's own name — ours and a user's are the same service. */
+const SERVICE = 'SEVPNCLIENT';
+
+/** Where the client service listens for vpncmd, on loopback only. */
+const ADMIN_PORT = 9930;
+
 /**
- * The client's CLI, wherever it is installed.
+ * Where the app installs its OWN copy of the client, on a machine that has none.
  *
- * The 64-bit binary first: on a 64-bit Windows the 32-bit twin talks to the same service but is
- * pointless, and preferring it would be a silent performance choice nobody made.
+ * Reported 2026-09-22: on a new computer «گیت‌وی» said the engine was not installed, and the
+ * only way forward was to find SoftEther's installer and run it by hand. The client now ships in
+ * core/softether and installs itself here on the first connect — see provisionClient().
+ *
+ * NOT the app's own core/. The service is registered by PATH, and the portable build unpacks to a
+ * fresh temp directory on every launch while an upgrade replaces the installed build's files — a
+ * service pointing into either stops existing under itself. And NOT anywhere an ordinary user can
+ * write: this binary runs as SYSTEM, so a folder a user could drop a DLL into is a privilege
+ * escalation. ProgramData's default ACL lets any user create files in a new subfolder, which is
+ * exactly why the Store locks its root; this folder is locked the same way (lockDir).
+ */
+function provisionDir() {
+    const programData = process.env.ProgramData || process.env.ALLUSERSPROFILE || 'C:\\ProgramData';
+    return path.join(programData, 'MLM VPN', 'softether');
+}
+
+/** The copy this build ships. */
+function bundledDir() { return require('./core-paths').bundled('core', 'softether'); }
+
+/**
+ * Where an install is made FROM: the store's newer version when it has activated one (it verified
+ * the digests and ran the probe before activating), otherwise the shipped copy. core-paths applies
+ * the store's rules — newer than shipped, inside the locked store root, files intact.
+ */
+function sourceDir() { return require('./core-paths').dir('softether', bundledDir()); }
+function sourceVersion() {
+    return require('./core-paths').activeVersion('softether')
+        || require('./store/shipped').SHIPPED.softether.version;
+}
+
+/** The marker an install of ours leaves next to itself: { version, at, exe }, or null. */
+function ourInstall() {
+    try { return JSON.parse(fs.readFileSync(path.join(provisionDir(), 'installed-by-mlmvpn.json'), 'utf8')); } catch (e) { return null; }
+}
+
+/** Is this service executable the copy WE installed — never a SoftEther the user installed? */
+function isOurs(exe) {
+    return !!exe && path.resolve(path.dirname(exe)).toLowerCase() === path.resolve(provisionDir()).toLowerCase() && !!ourInstall();
+}
+
+/**
+ * Which twin to run: the 64-bit one on any 64-bit Windows, whatever this app was built as. The
+ * 32-bit build runs on 64-bit machines too, and SoftEther's 32-bit client on a 64-bit Windows is a
+ * driver it cannot install.
+ */
+function is64BitWindows() {
+    return process.arch === 'x64' || process.arch === 'arm64'
+        || !!process.env.PROCESSOR_ARCHITEW6432 || /64/.test(process.env.PROCESSOR_ARCHITECTURE || '');
+}
+function exeNames() {
+    return is64BitWindows()
+        ? { client: 'vpnclient_x64.exe', cli: 'vpncmd_x64.exe' }
+        : { client: 'vpnclient.exe', cli: 'vpncmd.exe' };
+}
+
+/**
+ * The executable the client SERVICE is registered with, or null when there is no such service.
+ *
+ * Read from the registry rather than assumed to be in Program Files: a user may have installed
+ * SoftEther anywhere, and our own install lives in ProgramData. Cached for a few seconds — the
+ * status poll asks often — and dropped whenever this module changes the service itself.
+ */
+let serviceCache = { at: 0, exe: undefined };
+function serviceExe(fresh) {
+    if (!fresh && serviceCache.exe !== undefined && Date.now() - serviceCache.at < 15000) return serviceCache.exe;
+    let exe = null;
+    try {
+        const r = spawnSync('reg', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Services\\${SERVICE}`, '/v', 'ImagePath'],
+            { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+        const m = String(r.stdout || '').match(/ImagePath\s+REG_(?:EXPAND_)?SZ\s+(.+)/);
+        if (m) {
+            const raw = m[1].trim();
+            exe = raw.startsWith('"') ? raw.slice(1, raw.indexOf('"', 1)) : raw.split(/\s+\//)[0];
+            exe = exe || null;
+        }
+    } catch (e) { /* no reg.exe answer: treat as no service, provisioning will say so if it fails */ }
+    serviceCache = { at: Date.now(), exe };
+    return exe;
+}
+
+/**
+ * The client's CLI.
+ *
+ * Any vpncmd can manage any 4.x client service — it is a TCP client for ADMIN_PORT — so the
+ * bundled copy is the last resort beside whichever client is installed. The 64-bit binary first:
+ * on a 64-bit Windows the 32-bit twin talks to the same service but is pointless, and preferring it
+ * would be a silent performance choice nobody made.
  */
 function cliPath() {
+    const svc = serviceExe();
     const roots = [
         process.env['ProgramFiles'] && path.join(process.env['ProgramFiles'], 'SoftEther VPN Client'),
         process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'SoftEther VPN Client'),
-        require('./core-paths').bundled('core', 'softether'),
+        svc && path.dirname(svc),
+        provisionDir(),
+        sourceDir(),
     ].filter(Boolean);
     for (const r of roots) {
         for (const exe of ['vpncmd_x64.exe', 'vpncmd.exe']) {
@@ -89,16 +193,18 @@ function cliPath() {
     return null;
 }
 
-/** The bundled installer, for a machine that does not have the client yet. */
-function installerPath() {
-    for (const exe of ['vpnsetup_x64.exe', 'vpnsetup.exe']) {
-        const p = require('./core-paths').bundled('core', 'softether', exe);
-        if (fs.existsSync(p)) return p;
-    }
-    return null;
+/** A client service exists and there is a CLI to drive it. */
+function isInstalled() { return !!serviceExe() && !!cliPath(); }
+
+/** A complete copy to install from exists, so a machine without SoftEther can have it on the first connect. */
+function canProvision() {
+    const n = exeNames();
+    const dir = sourceDir();
+    return [n.client, n.cli, 'hamcore.se2'].every(f => fs.existsSync(path.join(dir, f)));
 }
 
-function isInstalled() { return !!cliPath(); }
+/** Kept for the older status field; the bundle is no longer an installer the user runs. */
+function installerPath() { return null; }
 
 function ensureDataDir() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -313,7 +419,7 @@ function servers() {
                     return {
                         rows,
                         source: p === livePath() ? 'updated' : 'bundled',
-                        at: fs.statSync(p).mtimeMs,
+                        at: p === seedPath() ? (seedDate() || fs.statSync(p).mtimeMs) : fs.statSync(p).mtimeMs,
                     };
                 }
             }
@@ -332,6 +438,8 @@ const LIST_URL = 'https://www.vpngate.net/api/iphone/';
  * same fetch could not connect at all.
  *
  *  1. Direct.
+ *  1b. Through the user's own relay Worker (vpngate-relay.js) — where the site is filtered outright,
+ *     as on this line since 2026-09-29, this is the route that works with no tunnel at all.
  *  2. Through whichever of the app's own engines is connected right now. This is the route that
  *     makes the feature self-healing: the user turns on any tunnel, the list updates, and the
  *     gateway then works on its own.
@@ -343,13 +451,13 @@ const LIST_URL = 'https://www.vpngate.net/api/iphone/';
  */
 async function refreshServers(onLog) {
     const log = (m) => { try { if (onLog) onLog(`[گیت‌وی] ${m}`); } catch (e) { /* no page */ } };
-    const attempts = [{ name: 'مستقیم', port: null }];
+    const attempts = [{ name: 'مستقیم', port: null }, { name: 'از ورکر خودتان روی کلادفلر', relay: true }];
     for (const p of liveSocksPorts()) attempts.push({ name: `از تونل روی پورت ${p}`, port: p });
 
     for (const a of attempts) {
         try {
             log(`دریافت فهرست ${a.name}…`);
-            const raw = await fetchList(a.port);
+            const raw = a.relay ? await require('./vpngate-relay').fetchList(log) : await fetchList(a.port);
             // «اوپن‌وی‌پی‌ان» shares this archive and needs one thing from the column `slim()` is
             // about to throw away: each relay's real OpenVPN port. Volunteer relays serve it on
             // whatever port their owner chose, so without this they are all dialled on 443 and
@@ -403,7 +511,45 @@ function liveSocksPorts() {
     return ports;
 }
 
-function fetchList(socksPort) {
+/**
+ * The DIRECT path's own resolution of the list's host (Android 1.2.36 › ۶). The filtered resolver
+ * answers www.vpngate.net with the block page — 10.10.34.36, and an AAAA of the same shape
+ * (2001:4188:2:600:10:10:34:36) — so a private answer skips straight to DoH instead of timing out
+ * on a page that will never serve the list. DoH goes to 8.8.8.8 BY ADDRESS: cloudflare-dns.com and
+ * dns.google resolve to the block page themselves, and 1.1.1.1 / 1.0.0.1 did not answer (measured).
+ * No SNI either: a handshake naming dns.google is reset here (2026-09-29); by address alone it
+ * answers in ~0.5 s, and Google's certificate covers the IP 8.8.8.8 itself.
+ * Measured on the phone: the refresh went from 56 s to 17 s.
+ */
+const isBlockAnswer = (ip) => /^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip) || /:10:10:34:3\d$/i.test(ip);
+async function directAddress(host) {
+    const dns = require('dns').promises;
+    let sys = [];
+    try { sys = (await dns.lookup(host, { all: true })).map((a) => a.address); } catch (e) { sys = []; }
+    const good = sys.filter((ip) => !isBlockAnswer(ip));
+    if (good.length) return { ip: null };                 // the system's answer is fine: resolve as usual
+    const https = require('https');
+    const ask = (type) => new Promise((resolve) => {
+        const req = https.get({ host: '8.8.8.8', path: `/resolve?name=${encodeURIComponent(host)}&type=${type}`,
+            headers: { Accept: 'application/dns-json' }, timeout: 8000 }, (res) => {
+            let b = ''; res.setEncoding('utf8'); res.on('data', (c) => { b += c; });
+            res.on('end', () => { try { resolve(((JSON.parse(b).Answer) || []).map((a) => a.data).filter((d) => require('net').isIP(d) && !isBlockAnswer(d))); } catch (e) { resolve([]); } });
+        });
+        req.on('timeout', () => { req.destroy(); resolve([]); });
+        req.on('error', () => resolve([]));
+    });
+    const ips = await ask('A');
+    return { ip: ips[0] || null, blocked: sys.length > 0 };
+}
+
+async function fetchList(socksPort) {
+    let pinned = null;
+    if (!socksPort) {
+        const host = new URL(LIST_URL).hostname;
+        const d = await directAddress(host);
+        if (d.blocked && !d.ip) throw new Error('نام سایت VPN Gate روی این خط به صفحهٔ مسدودی می‌رود و DoH هم جواب نداد');
+        pinned = d.ip;
+    }
     return new Promise((resolve, reject) => {
         const https = require('https');
         const opts = { timeout: 60000, headers: { 'User-Agent': 'Mozilla/5.0' } };
@@ -411,6 +557,8 @@ function fetchList(socksPort) {
             const { SocksTlsAgent } = require('./socks-agents');
             opts.agent = new SocksTlsAgent(socksPort);
         }
+        // The DoH answer is dialled by address with the real name as SNI and Host.
+        if (pinned) opts.lookup = (h, o, cb) => { if (typeof o === 'function') cb = o; if (o && o.all) cb(null, [{ address: pinned, family: 4 }]); else cb(null, pinned, 4); };
         const req = https.get(LIST_URL, opts, (res) => {
             if (res.statusCode !== 200) { res.resume(); return reject(new Error(`پاسخ ${res.statusCode}`)); }
             let body = '';
@@ -612,17 +760,328 @@ function record(line, onLog) {
 // Connecting
 // ============================================================
 
-/** A virtual adapter to bind the session to, creating one only if the machine has none. */
-function ensureNic(onLog) {
-    const list = vc('NicList');
-    const names = list.lines
-        .filter(l => /^Virtual Network Adapter Name/.test(l))
-        .map(l => l.split('|')[1].trim());
-    if (names.length) return names[0];
-    record('آداپتور مجازی ساخته می‌شود…', onLog);
-    const made = vc('NicCreate', NIC);
-    if (!made.ok) throw new Error(`آداپتور مجازی ساخته نشد: ${made.error}`);
-    return NIC;
+// ============================================================
+// Installing the client — once, on a machine that has none
+// ============================================================
+
+/**
+ * Run a program WITHOUT blocking. The app's server lives in Electron's main thread, and an install
+ * that takes a minute through spawnSync is a minute of frozen window.
+ */
+function runAsync(exe, args, { timeout = 60000 } = {}) {
+    return new Promise((resolve) => {
+        let out = '';
+        let done = false;
+        let child = null;
+        let timer = null;
+        const finish = (code) => { if (done) return; done = true; clearTimeout(timer); resolve({ code, out }); };
+        try {
+            child = spawn(exe, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch (e) { resolve({ code: -1, out: e.message }); return; }
+        child.stdout.on('data', d => { out += d.toString('utf8'); });
+        child.stderr.on('data', d => { out += d.toString('utf8'); });
+        child.on('error', (e) => { out += e.message; finish(-1); });
+        child.on('close', (code) => finish(code));
+        timer = setTimeout(() => { try { child.kill(); } catch (e) {} out += '\n[timeout]'; finish(-2); }, timeout);
+    });
+}
+
+/** vc() for the commands that can take a minute — NicCreate installs a driver. */
+async function vcAsync(args, timeout) {
+    const exe = cliPath();
+    if (!exe) return { ok: false, lines: [], error: 'ابزار مدیریت سافت‌اتر پیدا نشد.' };
+    const r = await runAsync(exe, ['localhost', '/CLIENT', '/CMD', ...args], { timeout });
+    const lines = r.out.split(/\r?\n/).slice(4).map(l => l.replace(/\s+$/, ''));
+    const ok = /completed successfully/i.test(r.out);
+    return { ok, lines, error: ok ? null : (r.code === -2 ? 'زمان تمام شد' : (lines.find(l => l.trim()) || 'دستور ناموفق')) };
+}
+
+/**
+ * Lock a folder the way the Store locks its root (store/cores.js › protectRoot): SYSTEM and
+ * Administrators may write, users may only read and execute, nothing inherited. Verified by
+ * reading the result back — icacls' exit code alone says the command ran, not what it left.
+ */
+async function lockDir(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    const icacls = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'icacls.exe');
+    const grant = await runAsync(icacls, [dir, '/inheritance:r',
+        '/grant:r', '*S-1-5-18:(OI)(CI)F',
+        '/grant:r', '*S-1-5-32-544:(OI)(CI)F',
+        '/grant:r', '*S-1-5-32-545:(OI)(CI)RX',
+        '/grant:r', '*S-1-5-11:(OI)(CI)RX'], { timeout: 30000 });
+    await runAsync(icacls, [dir, '/setowner', '*S-1-5-32-544'], { timeout: 30000 });
+    const read = await runAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        '(Get-Acl -LiteralPath ' + JSON.stringify(dir) + ').Sddl'], { timeout: 30000 });
+    const { sddlIsLocked } = require('./store/cores');
+    if (grant.code !== 0 || !sddlIsLocked(read.out.trim())) {
+        throw new Error('پوشهٔ موتور گیت‌وی قفل نشد' + (grant.out.trim() ? ` (${grant.out.trim().slice(0, 120)})` : '')
+            + ' — بدون قفل نصبش نمی‌کنم، چون این موتور با دسترسی سیستم اجرا می‌شود.');
+    }
+}
+
+/**
+ * The service's state, optionally starting it first. Get-Service, not sc.exe: sc prints localised
+ * labels ("STATE" is not "STATE" on every Windows), the ServiceControllerStatus enum is not.
+ * Returns NONE | DISABLED | Running | Stopped | … | ERR <message>.
+ */
+async function serviceStatus(startIt) {
+    const script = [
+        `$s = Get-Service -Name '${SERVICE}' -ErrorAction SilentlyContinue`,
+        "if (-not $s) { 'NONE'; exit }",
+        "if ($s.StartType -eq 'Disabled') { 'DISABLED'; exit }",
+        // A service /setup_install has just started can still be StartPending, and Start-Service
+        // on a starting service THROWS («already running») — so that one is only waited for.
+        startIt ? `try { if ($s.Status -eq 'StartPending') { $s.WaitForStatus('Running', [TimeSpan]::FromSeconds(25)) } elseif ($s.Status -ne 'Running') { Start-Service -Name '${SERVICE}' -ErrorAction Stop; $s.WaitForStatus('Running', [TimeSpan]::FromSeconds(25)) } } catch { 'ERR ' + $_.Exception.Message; exit }` : '',
+        `(Get-Service -Name '${SERVICE}').Status.ToString()`,
+    ].filter(Boolean).join('\n');
+    const r = await runAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 45000 });
+    return (r.out.trim().split(/\r?\n/).pop() || '').trim();
+}
+
+/** Is the client accepting management connections yet? The service starts before it listens. */
+function adminPortOpen() {
+    return new Promise((resolve) => {
+        const s = net.connect(ADMIN_PORT, '127.0.0.1');
+        const done = (v) => { try { s.destroy(); } catch (e) {} resolve(v); };
+        s.setTimeout(1500, () => done(false));
+        s.once('connect', () => done(true));
+        s.once('error', () => done(false));
+    });
+}
+
+/**
+ * Install the shipped client as the machine's SoftEther client service.
+ *
+ * `/setup_install` is the one command SoftEther's own installer runs (Mayaqua/Microsoft.c ›
+ * SVC_MODE_SETUP_INSTALL): silent, no dialogs — it replaces any service of the same name,
+ * registers THIS executable, and starts it. Replacing is exactly why it only runs when no
+ * SEVPNCLIENT exists at all, checked again immediately before: a SoftEther the user installed
+ * themselves is used as it is and never re-pointed at our copy.
+ */
+async function provisionClient(onLog, onStatus) {
+    const names = exeNames();
+    const src = sourceDir();
+    const need = [names.client, names.cli, 'hamcore.se2'];
+    const missing = need.filter(f => !fs.existsSync(path.join(src, f)));
+    if (missing.length) {
+        // A packaging fault, never the user's: say so plainly instead of sending them hunting.
+        throw new Error(`این نسخه از برنامه ناقص است: فایل‌های موتور گیت‌وی (${missing.join('، ')}) همراهش نیامده. برنامه را دوباره نصب کنید.`);
+    }
+    state.stage = 'installing';
+    state.installKind = 'first';
+    state.detail = 'آماده‌سازی موتور گیت‌وی — فقط بار اول';
+    push(onStatus);
+    record('موتور گیت‌وی روی این سیستم نیست؛ نسخهٔ همراه برنامه نصب می‌شود. فقط بار اول است و کمتر از یک دقیقه طول می‌کشد.', onLog);
+
+    const dir = provisionDir();
+    await lockDir(dir);
+    // lang.config pins English: the output of every vc() call is parsed by its English phrases
+    // («completed successfully», the table labels), and SoftEther otherwise follows the OS language.
+    for (const f of [...need, 'lang.config', 'LICENSE.txt']) {
+        const from = path.join(src, f);
+        if (!fs.existsSync(from)) continue;
+        const to = path.join(dir, f);
+        try {
+            if (fs.existsSync(to) && fs.statSync(to).size === fs.statSync(from).size) continue;
+            await fs.promises.copyFile(from, to);
+        } catch (e) {
+            throw new Error(`کپی ${f} در پوشهٔ موتور انجام نشد: ${e.message}`);
+        }
+    }
+
+    if (serviceExe(true)) return;
+    record('ثبت سرویس موتور گیت‌وی…', onLog);
+    const r = await runAsync(path.join(dir, names.client), ['/setup_install'], { timeout: 90000 });
+    if (!serviceExe(true)) {
+        throw new Error(`نصب موتور گیت‌وی انجام نشد (کد ${r.code}${r.out.trim() ? '، ' + r.out.trim().slice(0, 160) : ''}).`);
+    }
+    // Manual start, not the installer's Automatic: nothing should run at every boot for a feature
+    // that may be opened once a month. ensureClient() starts it on each connect.
+    await runAsync('sc.exe', ['config', SERVICE, 'start=', 'demand'], { timeout: 15000 });
+    writeMarker(sourceVersion(), names.client);
+    record('موتور گیت‌وی نصب شد.', onLog);
+}
+
+function writeMarker(version, exe) {
+    try {
+        fs.writeFileSync(path.join(provisionDir(), 'installed-by-mlmvpn.json'),
+            JSON.stringify({ at: Date.now(), version, exe }, null, 2));
+    } catch (e) { /* only a note for whoever looks at the folder — and the version the next upgrade compares */ }
+}
+
+/**
+ * Move OUR client service to a newer version the store has activated.
+ *
+ * The store's rule for every core is that a running engine is never touched and the new version
+ * is picked up at its next start. For a service, «next start» is the next connect: this runs from
+ * ensureClient(), before any session exists. The service keeps its path (provisionDir), so it is
+ * stopped, its files replaced, and started again — no re-registration.
+ *
+ * Only ever for the copy we installed. A SoftEther the user installed themselves is theirs to
+ * update; the store shows the engine, it does not reach into their Program Files.
+ *
+ * Best-effort: any failure leaves the version that was already working, running.
+ */
+async function upgradeOurClient(onLog, onStatus) {
+    const svc = serviceExe(true);
+    if (!isOurs(svc)) return;
+    const mine = ourInstall();
+    const want = sourceVersion();
+    const versions = require('./store/versions');
+    if (!mine || !mine.version || !versions.newer(want, mine.version)) return;
+    const src = sourceDir();
+    const names = exeNames();
+    const files = [names.client, names.cli, 'hamcore.se2', 'lang.config', 'LICENSE.txt'].filter(f => fs.existsSync(path.join(src, f)));
+    if (!files.includes(names.client) || !files.includes('hamcore.se2')) return;
+
+    state.stage = 'installing';
+    state.installKind = 'upgrade';
+    state.detail = `به‌روزرسانی موتور گیت‌وی از ${mine.version} به ${want}`;
+    push(onStatus);
+    record(`موتور گیت‌وی از ${mine.version} به ${want} به‌روز می‌شود (نسخهٔ نصب‌شده از استور)…`, onLog);
+    await runAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        `Stop-Service -Name '${SERVICE}' -Force -ErrorAction SilentlyContinue; `
+        + `try { (Get-Service -Name '${SERVICE}').WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) } catch {}`], { timeout: 40000 });
+    try {
+        await lockDir(provisionDir());
+        for (const f of files) await fs.promises.copyFile(path.join(src, f), path.join(provisionDir(), f));
+    } catch (e) {
+        // A half-copied set is still a set of SoftEther 4.x files that run; the version marker is
+        // left alone, so the next connect tries again. ensureClient starts the service either way.
+        record(`به‌روزرسانی موتور گیت‌وی انجام نشد (${e.message}) — با نسخهٔ قبلی ادامه می‌دهم.`, onLog);
+        return;
+    }
+    writeMarker(want, names.client);
+    record(`موتور گیت‌وی به ${want} به‌روز شد.`, onLog);
+}
+
+/**
+ * A running client service to talk to — whoever installed it — or an error that says what to do.
+ * Never «not installed»: the machine without SoftEther gets the shipped one.
+ */
+async function ensureClient(onLog, onStatus) {
+    if (!serviceExe(true)) await provisionClient(onLog, onStatus);
+    else await upgradeOurClient(onLog, onStatus);
+    const st = await serviceStatus(true);
+    if (st === 'NONE') throw new Error('سرویس موتور گیت‌وی بعد از نصب پیدا نشد.');
+    if (st === 'DISABLED') {
+        // The user's own setting, on their own install: not ours to override.
+        throw new Error(`سرویس سافت‌اتر (${SERVICE}) روی این سیستم غیرفعال شده است. در services.msc نوع راه‌اندازی‌اش را Manual کنید و دوباره وصل شوید.`);
+    }
+    if (st !== 'Running') throw new Error('سرویس موتور گیت‌وی روشن نشد' + (st ? ` (${st.replace(/^ERR\s*/, '')})` : '') + '.');
+    for (let i = 0; i < 40; i++) {
+        if (await adminPortOpen()) return;
+        await sleep(500);
+    }
+    throw new Error(`سرویس موتور گیت‌وی روشن است ولی به پورت مدیریتش (${ADMIN_PORT}) جواب نمی‌دهد.`);
+}
+
+/** The client's adapters from `NicList`: [{ name, status, version }]. */
+async function nicRows() {
+    const r = await vcAsync(['NicList'], 30000);
+    const rows = [];
+    let cur = null;
+    for (const l of r.lines) {
+        const [k, v] = l.split('|').map((x) => (x || '').trim());
+        if (/^Virtual Network Adapter Name/.test(k)) { cur = { name: v, status: '', version: '' }; rows.push(cur); }
+        else if (cur && /^Status/.test(k)) cur.status = v;
+        else if (cur && /^Version/.test(k)) cur.version = v;
+    }
+    return rows;
+}
+
+/** SoftEther's error code in a vpncmd answer («Error occurred. (Error code: 31)»), or null. */
+const vpnErrCode = (text) => { const m = /Error code:\s*(\d+)/i.exec(String(text || '')); return m ? Number(m[1]) : null; };
+
+/**
+ * Is Windows' «Memory integrity» (HVCI, Core isolation) on? It refuses kernel drivers that do not
+ * meet its rules, and SoftEther's virtual adapter driver is one of the drivers it can refuse — the
+ * adapter then never appears and every attempt ends in the same «virtual adapter» error.
+ */
+async function memoryIntegrityOn() {
+    const r = await runAsync('reg.exe', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity', '/v', 'Enabled'], { timeout: 10000 });
+    return /Enabled\s+REG_DWORD\s+0x1\b/i.test(r.out);
+}
+
+/** The Windows side of the adapter: enable it when Windows has it switched off. */
+async function enableOsAdapter(onLog) {
+    const r = await runAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        "$a = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -like 'VPN Client Adapter*' }; " +
+        "$off = $a | Where-Object { $_.Status -eq 'Disabled' }; if ($off) { $off | Enable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; 'ENABLED ' + ($off.Name -join ',') } " +
+        "elseif ($a) { 'OK ' + ($a.Name -join ',') } else { 'NONE' }"], { timeout: 30000 });
+    const out = r.out.trim();
+    if (/^ENABLED/.test(out)) record(`آداپتور در ویندوز خاموش بود و روشن شد (${out.slice(8)}).`, onLog);
+    return out;
+}
+
+/**
+ * Advice for an adapter that cannot be made, from what SoftEther and Windows actually said.
+ * A user reported «گیت‌وی فعال نمی‌شود، خطای آداپتور مجازی» (2026-09-29): that one sentence
+ * covered four different faults, each with its own fix.
+ */
+async function explainNicFailure(raw) {
+    const code = vpnErrCode(raw);
+    const base = `آداپتور مجازی گیت‌وی ساخته نشد${code ? ` (کد ${code} سافت‌اتر)` : ''}: ${raw}`;
+    if (code === 22 || code === 31 || /driver|install/i.test(raw)) {
+        if (await memoryIntegrityOn()) {
+            return base + '\n\nعلت: «Memory integrity» (در Windows Security › Device security › Core isolation) روشن است و ویندوز درایور آداپتور مجازی SoftEther را نمی‌پذیرد. '
+                + 'یا آن را خاموش کنید و کامپیوتر را یک‌بار ری‌استارت کنید، یا از «اوپن‌وی‌پی‌ان» استفاده کنید — همان سرورهای VPN Gate را با آداپتور Wintun خودش (بدون این درایور) وصل می‌کند.';
+        }
+        return base + '\n\nویندوز نصب درایور آداپتور را رد کرد. یک‌بار کامپیوتر را ری‌استارت کنید و دوباره «اتصال» بزنید؛ اگر باز نشد، «اوپن‌وی‌پی‌ان» همین سرورها را بدون این درایور وصل می‌کند.';
+    }
+    if (code === 32) return base + '\n\nنام آداپتور را سافت‌اتر نپذیرفت. اگر برنامهٔ SoftEther خودتان نصب است، یک آداپتور به نام «VPN» در آن بسازید.';
+    return base + '\n\nاگر پیام ادامه داشت، «اوپن‌وی‌پی‌ان» همین سرورها را بدون آداپتور سافت‌اتر وصل می‌کند.';
+}
+
+/**
+ * A virtual adapter to bind the session to — found, repaired, or made.
+ *
+ * It used to take the first name `NicList` printed and trust it. A user got «virtual adapter»
+ * errors that came from an adapter that was there but DISABLED (in SoftEther or in Windows), from
+ * a create that failed because a half-installed one already existed, and from a driver Windows
+ * refused. Each is handled here: a disabled adapter is enabled on both sides, «already exists» is
+ * treated as found, one failed create is retried after the driver settles, and what still fails is
+ * explained (explainNicFailure). vcAsync throughout — this runs on a click, on the main thread.
+ */
+async function ensureNic(onLog) {
+    let rows = await nicRows();
+    if (!rows.length) {
+        // The first adapter on a machine installs SoftEther's driver, which can take most of a minute.
+        record('آداپتور مجازی ساخته می‌شود (بار اول تا یک دقیقه)…', onLog);
+        let made = await vcAsync(['NicCreate', NIC], 180000);
+        if (!made.ok && vpnErrCode(made.error + ' ' + made.lines.join(' ')) !== 30) {
+            record(`ساخت آداپتور نشد (${made.error}) — چند ثانیه صبر و تلاش دوباره…`, onLog);
+            await sleep(4000);
+            rows = await nicRows();
+            if (!rows.length) made = await vcAsync(['NicCreate', NIC], 180000);
+        }
+        if (!rows.length) rows = await nicRows();
+        if (!rows.length) {
+            const raw = [made.error, ...made.lines.filter((l) => /error/i.test(l))].filter(Boolean).join(' ');
+            throw new Error(await explainNicFailure(raw || 'دستور ناموفق'));
+        }
+    }
+    const row = rows.find((r) => r.name === NIC) || rows[0];
+    if (/disabled/i.test(row.status)) {
+        record(`آداپتور «${row.name}» در سافت‌اتر خاموش بود — روشن می‌شود…`, onLog);
+        const en = await vcAsync(['NicEnable', row.name], 60000);
+        if (!en.ok) record(`روشن کردن آداپتور نشد: ${en.error}`, onLog);
+    }
+    await enableOsAdapter(onLog);
+    return row.name;
+}
+
+/**
+ * One repair for a session that failed on the adapter: update SoftEther's driver to the client's
+ * own version (`NicUpgrade` — a driver older than the client is a known cause) and enable it again.
+ */
+async function repairNic(name, onLog) {
+    record(`بازسازی درایور آداپتور «${name}»…`, onLog);
+    const up = await vcAsync(['NicUpgrade', name], 180000);
+    if (!up.ok) record(`بروزرسانی درایور نشد: ${up.error}`, onLog);
+    await vcAsync(['NicEnable', name], 60000);
+    await enableOsAdapter(onLog);
+    return up.ok;
 }
 
 /** Whichever IPv4 the client's adapter has been given, or null while it has none. */
@@ -724,7 +1183,6 @@ function sweepStrayAccounts() {
  */
 async function connect(opts, onLog, onStatus) {
     if (state.connecting || state.connected) return { ok: true, host: state.host };
-    if (!isInstalled()) throw new Error('کلاینت سافت‌اتر روی این سیستم نیست.');
 
     const o = opts || {};
     const host = String(o.host || '').trim();
@@ -750,7 +1208,15 @@ async function connect(opts, onLog, onStatus) {
     push(onStatus);
 
     try {
-        const nic = ensureNic(onLog);
+        // A machine that has never had SoftEther gets the shipped client here, once.
+        await ensureClient(onLog, onStatus);
+        if (state.stage !== 'connecting') {
+            state.stage = 'connecting';
+            state.installKind = null;
+            state.detail = '';
+            push(onStatus);
+        }
+        const nic = await ensureNic(onLog);
         // Anything left from a previous run goes first: an account that exists with different
         // settings would be reused silently, and the relay the panel shows would not be the relay
         // carrying the traffic.
@@ -775,7 +1241,15 @@ async function connect(opts, onLog, onStatus) {
         vc('AccountServerCertDisable', ACCOUNT);
 
         record('اتصال…', onLog);
-        const started = vc('AccountConnect', ACCOUNT);
+        let started = vc('AccountConnect', ACCOUNT);
+        // An adapter fault (disabled, driver older than the client, a driver error) is repaired once
+        // and the connect retried, instead of handing the user SoftEther's raw sentence.
+        const nicFault = (r) => !r.ok && (/adapter|driver/i.test(r.error + ' ' + r.lines.join(' ')) || [22, 31].includes(vpnErrCode(r.error + ' ' + r.lines.join(' '))));
+        if (nicFault(started)) {
+            await repairNic(nic, onLog);
+            started = vc('AccountConnect', ACCOUNT);
+            if (nicFault(started)) throw new Error(await explainNicFailure(started.error));
+        }
         if (!started.ok) throw new Error(started.error);
 
         // WAIT FOR AN ADDRESS, NOT FOR "CONNECTED".
@@ -808,9 +1282,12 @@ async function connect(opts, onLog, onStatus) {
         push(onStatus);
         return { ok: true, host, ip };
     } catch (e) {
-        // Never leave a half-made account behind: the next attempt would reuse it.
-        vc('AccountDisconnect', ACCOUNT);
-        vc('AccountDelete', ACCOUNT);
+        // Never leave a half-made account behind: the next attempt would reuse it. (Only when
+        // there is a client to ask — a failed install has no account to clean up.)
+        if (isInstalled()) {
+            vc('AccountDisconnect', ACCOUNT);
+            vc('AccountDelete', ACCOUNT);
+        }
         state.connecting = false;
         state.connected = false;
         state.stage = 'failed';
@@ -914,6 +1391,11 @@ function isRunning() { return state.connected || state.connecting; }
 function getStatus() {
     return {
         installed: isInstalled(),
+        // Not installed is no longer a dead end: the first connect installs the shipped client.
+        // Only a build that lost core/softether has neither.
+        installable: canProvision(),
+        // While stage is 'installing': a first install, or moving our copy to a store version.
+        installKind: state.installKind || null,
         installer: !!installerPath(),
         connecting: state.connecting,
         connected: state.connected,
@@ -1349,7 +1831,8 @@ function suggest() {
 }
 
 module.exports = {
-    isInstalled, installerPath, cliPath,
+    isInstalled, installerPath, cliPath, canProvision, ensureClient, provisionDir, SERVICE,
+    ensureNic, nicRows, repairNic, explainNicFailure, memoryIntegrityOn, vpnErrCode,
     servers, refreshServers, measure,
     connect, disconnect, isRunning, getStatus, getLogs, readTrafficCounters,
     // «فهرست من» / «آرشیو» and everything the user does to them

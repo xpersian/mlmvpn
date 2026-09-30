@@ -10,11 +10,13 @@
 //             never touched; the new version is used the next time it starts, and one click goes
 //             back.
 //
-//   وورکرها   panels on the user's OWN Cloudflare account (BPB, Zeus, Edge, DNS اختصاصی, رلهٔ GST,
-//             سرویس کلید تونل گیت‌هاب). Updating one replaces its CODE and nothing else: bindings,
-//             secrets, KV, D1 and routes stay exactly as they are — store/workers.js. Workers the
-//             store does not recognise are never touched, and the ones the Android app deploys are
-//             shown but left to it.
+//   وورکرها   panels on the user's OWN Cloudflare account (the nine of the Cloud window — BPB, Edge,
+//             Zeus, اسپایدر, نترا, گذرگاه, نوا, نهان, MLM — plus DNS اختصاصی, رلهٔ GST, سرویس کلید
+//             تونل گیت‌هاب). Updating one replaces its CODE and nothing else: bindings, secrets, KV,
+//             D1 and routes stay exactly as they are — store/workers.js. The Cloud panels update to
+//             their developer's newest code on GitHub, and each is also a product of its own
+//             (panelRows) whether or not it is deployed yet. Workers the store does not recognise
+//             are never touched, and the ones the Android app deploys are shown but left to it.
 //
 //   برنامه    MLM VPN itself, through the updater it already had (update-manager.js).
 //
@@ -42,6 +44,7 @@ const upstreamWatch = require('./store/upstream');
 const directUpstream = require('./store/direct');
 const iranConfigs = require('./store/iran-configs');
 const mitmConfig = require('./store/mitm-config');
+const workerLive = require('./store/worker-live');
 
 /**
  * Every data item's own module, by id. They share the shape (state/check/install/rollback and a
@@ -179,12 +182,40 @@ function cloudflareAccounts() {
     return out;
 }
 
+/**
+ * A cached survey row, judged again against the developer's code as it is known NOW.
+ *
+ * A survey reads every Worker on every account — slow and the user's own API allowance — so it runs
+ * on demand. The developer's newest code is read far more often (store/worker-live.js). When it has
+ * moved on since the survey, a row the survey called «بروز» is not any more, and saying so must not
+ * wait for the next survey. Only ever towards «update»: the button re-reads the Worker itself before
+ * touching it, so a panel that updated itself in between is told «already current», never overwritten.
+ */
+function reassess(w) {
+    const item = catalog.BY_ID[w.id];
+    if (!item || item.managedBy !== 'windows' || w.state === 'update' || w.state === 'external') return w;
+    const live = workerLive.meta(item.id);
+    if (item.compareBy === 'bytes') {
+        if (!live || !live.sha256 || !w.liveSha || w.state !== 'current' || live.sha256 === w.liveSha) return w;
+        return Object.assign({}, w, {
+            state: 'update', updatable: true, targetVersion: live.version,
+            notes: 'سازنده بعد از آخرین بررسی حساب، کد تازه منتشر کرده است (' + live.repo + ' @ ' + live.ref + ')',
+        });
+    }
+    if (w.deployedVersion === null || w.deployedVersion === undefined) return w;
+    const cmp = workersMod.compareToTarget(item, w.deployedVersion);
+    if (cmp === null || cmp >= 0 || !workersMod.withinFloor(item, w.deployedVersion)) return w;
+    const t = workersMod.target(item);
+    return Object.assign({}, w, { state: 'update', updatable: true, targetVersion: t.version, notes: t.notes || w.notes || '' });
+}
+
 /** The worker picture from the last survey — no network, so the window opens instantly. */
 function workerRows() {
     const cache = readCache();
     const rows = [];
     for (const acc of cache.accounts || []) {
-        for (const w of acc.workers || []) {
+        for (const raw of acc.workers || []) {
+            const w = reassess(raw);
             // One shape for the window: whatever the row is, `version` is what is in use and
             // `target` is what the store would put there.
             rows.push(Object.assign({}, w, {
@@ -226,6 +257,202 @@ function refreshWorkers() {
         }
         await writeCache({ accounts: out, at: Date.now() });
         return { accounts: out.length, workers: total };
+    });
+}
+
+/** Survey one account again and put it back into the cache, so its rows are right straight after a change. */
+async function resurvey(acc) {
+    const s = await workersMod.survey(acc);
+    const cache = readCache();
+    const idx = (cache.accounts || []).findIndex((a) => a.id === acc.id);
+    const rec = { id: acc.id, name: acc.name, subdomain: s.subdomain, workers: s.workers };
+    if (idx >= 0) cache.accounts[idx] = rec; else (cache.accounts = cache.accounts || []).push(rec);
+    cache.at = Date.now();
+    await writeCache(cache);
+}
+
+// ── the Cloud window's panels, one product each ──────────────────────────────────────────────
+//
+// The rows above are COPIES — one per Worker found on an account, and only after a survey. A user
+// who has not deployed Nova yet, or has not pressed «بررسی حساب‌ها», saw no Nova in the store at all.
+// These rows are the panels themselves: what the developer has published on their own GitHub (read
+// by store/worker-live.js, the same code a fresh install and every update use), who they are, and
+// how many copies on the user's accounts are behind it.
+
+const PANEL_LIVE_EVERY_MS = 6 * 60 * 60 * 1000;
+const PANEL_LIVE_RETRY_MS = 30 * 60 * 1000;
+let panelLiveRun = null;
+let panelLiveTriedAt = 0;
+
+/**
+ * Read the developer's newest code for any panel not looked at for six hours. Background only, one
+ * repository at a time, and never more often than every half hour when GitHub is not answering —
+ * the catalogue must open instantly on a line where github.com times out.
+ */
+function maybeRefreshPanels() {
+    if (panelLiveRun || Date.now() - panelLiveTriedAt < PANEL_LIVE_RETRY_MS) return;
+    const stale = catalog.CLOUD_PANELS.filter((item) => {
+        const m = workerLive.meta(item.id);
+        // By the last time GitHub was ASKED: a file that keeps failing the check is not re-downloaded
+        // every half hour, only every six.
+        const asked = m ? Math.max(m.at || 0, m.triedAt || 0) : 0;
+        return !asked || Date.now() - asked > PANEL_LIVE_EVERY_MS;
+    });
+    if (!stale.length) return;
+    panelLiveTriedAt = Date.now();
+    panelLiveRun = (async () => {
+        for (const item of stale) await workerLive.latest(item.id).catch(() => null);
+    })().finally(() => { panelLiveRun = null; });
+}
+
+/** «بررسی گیت‌هاب سازنده» — one panel, or all nine when `id` is empty. */
+function refreshPanels(id) {
+    const items = id ? catalog.CLOUD_PANELS.filter((x) => x.id === id) : catalog.CLOUD_PANELS;
+    if (!items.length) throw new Error('پنل «' + id + '» شناخته نشد.');
+    return jobs.start('panel-live:' + (id || 'all'), { kind: 'panel-live', title: 'کد تازهٔ سازنده' }, async (job) => {
+        const out = [];
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            jobs.phase(job, 'resolve', item.title);
+            jobs.progress(job, i, items.length);
+            const r = await workerLive.latest(item.id, { force: true, log: (l) => jobs.log(job, l) }).catch(() => null);
+            out.push({ id: item.id, version: r ? String(r.version) : null, from: r ? r.from : null });
+            if (!r) jobs.log(job, item.title + ': گیت‌هاب سازنده جواب نداد');
+        }
+        return { panels: out };
+    });
+}
+
+/**
+ * What the Cloud window itself recorded as installed: { code: [{ accId, script }] }. BPB, Edge and
+ * Zeus from its account records (the Worker is the first label of a workers.dev URL), the other six
+ * from cloud-panels.js. Local files only.
+ *
+ * The survey is a snapshot and can be weeks old; these records are written the moment a panel is
+ * installed. Without them the store said «روی حسابتان نیست» about six panels the user had installed
+ * after the last survey (seen 2026-10-01: the survey was 16 days old).
+ */
+function cloudInstalls() {
+    const out = {};
+    const add = (code, accId, script) => { if (script) (out[code] = out[code] || []).push({ accId: String(accId), script }); };
+    const scriptOf = (u) => {
+        try { const h = new URL(u).hostname; return /\.workers\.dev$/i.test(h) ? h.split('.')[0] : null; } catch (e) { return null; }
+    };
+    let list = [];
+    try {
+        const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.mlmvpn', 'user_data.json'), 'utf8'));
+        list = typeof d.cf_accounts === 'string' ? JSON.parse(d.cf_accounts) : d.cf_accounts;
+    } catch (e) { list = []; }
+    let cp = null;
+    try { cp = require('./cloud-panels'); } catch (e) { cp = null; }
+    for (const a of Array.isArray(list) ? list : []) {
+        if (!a || !a.id) continue;
+        add('BPB', a.id, a.url && scriptOf(a.url));
+        add('EDG', a.id, a.edgeUrl && scriptOf(a.edgeUrl));
+        add('ZEU', a.id, a.zeusUrl && scriptOf(a.zeusUrl));
+        if (cp) for (const [code, s] of Object.entries(cp.status(String(a.id)))) if (s.installed) add(code, a.id, s.script);
+    }
+    return out;
+}
+
+/** The Cloud window's installs of `item` that the last survey did not see. */
+function unsurveyedOf(item, copies, installs) {
+    return (installs[item.panel] || []).filter((k) => !copies.some((m) => m.id === item.id && String(m.accountId) === k.accId && m.script === k.script));
+}
+
+function panelState(mine, surveyed, unsurveyed) {
+    if (mine.some((r) => r.updatable)) return 'update';
+    // Installed, and the store has not read that copy yet: never «not installed».
+    if (!surveyed || unsurveyed.length) return 'unchecked';
+    if (!mine.length) return 'absent';
+    return mine.every((r) => r.state === 'current') ? 'current' : 'unknown';
+}
+
+/** One row per Cloud panel. `copies` are the rows out of workerRows(). */
+function panelRows(copies, surveyedAt, installs = cloudInstalls()) {
+    return catalog.CLOUD_PANELS.map((item) => {
+        const live = workerLive.meta(item.id);
+        const src = workerLive.SOURCES[item.id] || null;
+        const mine = copies.filter((r) => r.id === item.id);
+        const behind = mine.filter((r) => r.updatable);
+        const unsurveyed = unsurveyedOf(item, copies, installs);
+        return {
+            id: item.id, kind: 'panel', group: 'panels', code: item.panel, title: item.title,
+            repo: (item.upstream && item.upstream.repo) || '',
+            // Where the code is read from, so the page can say it rather than paraphrase it.
+            source: src ? { type: src.type, repo: src.repo, asset: src.asset || '', path: src.path || '', branch: src.branch || '', signed: !!src.sha256From } : null,
+            latest: live && live.version != null ? { version: String(live.version), ref: live.ref || '', repo: live.repo || '', at: live.at || 0, from: live.from || '' } : null,
+            // The last time GitHub was asked, and why it did not give good code if it did not.
+            asked: live && live.triedAt ? { at: live.triedAt, error: live.error || '' } : null,
+            version: null,
+            target: live && live.version != null ? { version: String(live.version), notes: '', released: '', from: 'live' } : null,
+            copies: mine.length,
+            behind: behind.length,
+            // Installed per the Cloud window's records but not read by a survey yet (script names).
+            unsurveyed: unsurveyed.map((k) => k.script),
+            state: panelState(mine, !!surveyedAt, unsurveyed),
+            job: jobs.view(jobs.get('panel:' + item.id)),
+            checkJob: jobs.view(jobs.get('panel-live:' + item.id)) || jobs.view(jobs.get('panel-live:all')),
+        };
+    });
+}
+
+/**
+ * «بروزرسانی همه» on a panel's page: every copy of it on every account, to the developer's newest
+ * code. Each copy is re-read and re-classified by workers.update before anything is uploaded — a
+ * copy that is already current (it updated itself, or the survey was old) is counted as such, not
+ * as a failure.
+ */
+function updatePanel(id) {
+    const item = catalog.CLOUD_PANELS.find((x) => x.id === id);
+    if (!item) throw new Error('پنل «' + id + '» شناخته نشد.');
+    return jobs.start('panel:' + id, { kind: 'panel', title: item.title }, async (job) => {
+        jobs.phase(job, 'resolve', item.title);
+        const live = await workerLive.latest(item.id, { force: true, log: (l) => jobs.log(job, l) }).catch(() => null);
+        if (!live) jobs.log(job, 'کد تازهٔ سازنده خوانده نشد — آخرین نسخهٔ سالمی که برنامه دارد به کار می‌رود');
+        const accounts = cloudflareAccounts();
+        let cache = readCache();
+        // Read the accounts first where there is something the survey has not seen: all of them
+        // when there was never a survey, else those where the Cloud window installed this panel
+        // after the last one — otherwise those copies would be silently left behind.
+        const unseen = new Set(unsurveyedOf(item, workerRows().rows, cloudInstalls()).map((k) => k.accId));
+        const toScan = cache.at ? accounts.filter((a) => unseen.has(a.id)) : accounts;
+        for (const acc of toScan) {
+            jobs.phase(job, 'scan', acc.name);
+            try { await resurvey(acc); } catch (e) { jobs.log(job, acc.name + ': ' + e.message); }
+        }
+        if (toScan.length) cache = readCache();
+        const targets = [];
+        for (const acc of accounts) {
+            const rec = (cache.accounts || []).find((a) => a.id === acc.id);
+            for (const w of (rec && rec.workers) || []) if (w.id === item.id) targets.push({ acc, script: w.script });
+        }
+        if (!targets.length) {
+            const e = new Error('روی حساب‌های کلادفلرِ برنامه نسخه‌ای از ' + item.title + ' پیدا نشد. از پنجرهٔ «ابری» نصبش کنید.');
+            e.code = 'none';
+            throw e;
+        }
+        const done = [], current = [], failed = [];
+        const touched = new Set();
+        for (let i = 0; i < targets.length; i++) {
+            const { acc, script } = targets[i];
+            jobs.phase(job, 'worker', acc.name + ' — ' + script);
+            jobs.progress(job, i, targets.length);
+            try {
+                const r = await workersMod.update(acc, script, { expectId: item.id });
+                done.push({ account: acc.name, script, from: r.from, to: r.to });
+                jobs.log(job, acc.name + ' · ' + script + ': ' + (r.from == null ? '—' : r.from) + ' → ' + r.to);
+                touched.add(acc.id);
+            } catch (e) {
+                if (/همین حالا/.test(e.message)) { current.push({ account: acc.name, script }); touched.add(acc.id); jobs.log(job, acc.name + ' · ' + script + ': بروز بود'); }
+                else { failed.push({ account: acc.name, script, error: e.message }); jobs.log(job, acc.name + ' · ' + script + ': ' + e.message); }
+            }
+        }
+        for (const acc of accounts.filter((a) => touched.has(a.id))) {
+            try { await resurvey(acc); } catch (e) { /* the updates stand; the picture refreshes on the next look */ }
+        }
+        if (failed.length && !done.length && !current.length) throw new Error(failed[0].error);
+        return { done, current, failed };
     });
 }
 
@@ -303,9 +530,12 @@ async function catalogRows() {
     // — before the window can offer it. Background too, for the same reason.
     directUpstream.maybeRefresh();
     Object.values(DATA_MODULES).forEach((m) => m.maybeRefresh());
+    // The nine Cloud panels' newest code on their developers' GitHub — background, like the above.
+    maybeRefreshPanels();
     const rows = [];
     for (const item of catalog.CORES) rows.push(await coreRow(item));
     const w = workerRows();
+    rows.push(...panelRows(w.rows, w.at));
     rows.push(...w.rows);
     rows.push(...vodiRows());
     rows.push(...catalog.DATA.map(dataRow).filter(Boolean));
@@ -380,15 +610,7 @@ function updateWorker(accountId, script, expectId) {
         const r = await workersMod.update(acc, script, { expectId });
         jobs.log(job, r.title + ': ' + r.from + ' → ' + r.to);
         // Re-survey just this account so the row is right immediately after.
-        try {
-            const s = await workersMod.survey(acc);
-            const cache = readCache();
-            const idx = (cache.accounts || []).findIndex((a) => a.id === acc.id);
-            const rec = { id: acc.id, name: acc.name, subdomain: s.subdomain, workers: s.workers };
-            if (idx >= 0) cache.accounts[idx] = rec; else (cache.accounts = cache.accounts || []).push(rec);
-            cache.at = Date.now();
-            await writeCache(cache);
-        } catch (e) { /* the update itself succeeded; the picture refreshes on the next look */ }
+        try { await resurvey(acc); } catch (e) { /* the update itself succeeded; the picture refreshes on the next look */ }
         return r;
     });
 }
@@ -402,15 +624,7 @@ function rollbackWorker(accountId, script) {
         jobs.phase(job, 'rollback');
         const r = await workersMod.rollback(acc, script);
         jobs.log(job, 'کد قبلی برگردانده شد' + (r.restored ? ' (' + r.restored + ')' : ''));
-        try {
-            const s2 = await workersMod.survey(acc);
-            const cache = readCache();
-            const idx = (cache.accounts || []).findIndex((a) => a.id === acc.id);
-            const rec = { id: acc.id, name: acc.name, subdomain: s2.subdomain, workers: s2.workers };
-            if (idx >= 0) cache.accounts[idx] = rec; else (cache.accounts = cache.accounts || []).push(rec);
-            cache.at = Date.now();
-            await writeCache(cache);
-        } catch (e) { /* the restore itself succeeded */ }
+        try { await resurvey(acc); } catch (e) { /* the restore itself succeeded */ }
         return r;
     });
 }
@@ -424,10 +638,11 @@ function vodiRows() {
         gateways = mod.store.getGateways() || [];
         source = `${mod.deployer.VODI_REPO}@${mod.deployer.VODI_BRANCH}`;
     } catch (e) { return []; }
+    // One row per server; an RVG server has its own look (id 'rvg') but the same redeploy job.
     return gateways.map((g) => ({
-        id: 'vodi', kind: 'vodi', group: 'workers', gatewayId: g.id,
-        title: 'railway — ' + (g.name || g.id),
-        usedBy: g.domain || '', repo: (g.source || source).replace(/^repo:/, ''),
+        id: g.panel === 'rvg' ? 'rvg' : 'vodi', kind: 'vodi', group: 'workers', gatewayId: g.id,
+        title: (g.panel === 'rvg' ? 'RVG — ' : 'railway — ') + (g.name || g.id),
+        usedBy: g.domain || '', repo: (g.source || (g.panel === 'rvg' ? 'arvin341az-glitch/RVG@main' : source)).replace(/^repo:/, ''),
         version: null, target: null,
         // A branch has no version to read from here: a redeploy rebuilds whatever that branch
         // points at now, so the honest state is "can be redeployed", not "up to date".
@@ -566,8 +781,8 @@ const appUpdate = {
 };
 
 module.exports = {
-    catalogRows, coreRow, workerRows, refreshWorkers, cloudflareAccounts,
-    updateCore, rollbackCore, updateWorker, rollbackWorker, updateAll, upstream, refreshChannel, refreshUpstreamAll, updateData, rollbackData, iranProfiles, mitmConfigFile,
+    catalogRows, coreRow, workerRows, panelRows, reassess, refreshWorkers, cloudflareAccounts,
+    updateCore, rollbackCore, updateWorker, rollbackWorker, updatePanel, refreshPanels, updateAll, upstream, refreshChannel, refreshUpstreamAll, updateData, rollbackData, iranProfiles, mitmConfigFile,
     appUpdate, targetFor,
     jobs, channel, cores, workers: workersMod, catalog, versions,
 };

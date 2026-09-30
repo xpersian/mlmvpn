@@ -7,6 +7,10 @@
 // GitHub, the broker and Tailscale are all stubbed at global.fetch, so nothing leaves the
 // machine and no runner is ever dispatched. USERPROFILE is redirected first, so the real
 // ~/.mlmvpn is untouched.
+//
+// Driven on the v1 data plane explicitly: the account-pool failover is the same code for both
+// planes, and this scenario's stubs are v1's (Tailscale keys, repo secret). The v2-specific
+// path — broker check, sealed hand-off — is pinned in deployer-v2.test.js.
 const ROOT = require('path').resolve(__dirname, '..', '..');
 const fs = require('fs');
 const os = require('os');
@@ -136,7 +140,7 @@ function addAccount(login) {
     let session = null;
     let createError = null;
     try {
-        session = await deployer.createSession({ onLog: (m) => logs.push(m) });
+        session = await deployer.createSession({ dataPlane: 'v1', onLog: (m) => logs.push(m) });
     } catch (e) { createError = e; }
     if (process.env.GT_TEST_VERBOSE) {
         console.log(logs.join('\n'));
@@ -190,7 +194,7 @@ function addAccount(login) {
     addAccount('only');
     stubWorld({ behaviour: { only: 'dies' }, seen: new Set() });
     let soloErr = null;
-    try { await deployer.createSession({ onLog: () => {} }); } catch (e) { soloErr = e; }
+    try { await deployer.createSession({ dataPlane: 'v1', onLog: () => {} }); } catch (e) { soloErr = e; }
     t('a single spent account fails with a message about the allowance, not a generic error',
         !!soloErr && /سهم|تمام/.test(soloErr.message), soloErr && soloErr.message);
     t('a single spent account is left marked exhausted for the UI to explain',
@@ -210,7 +214,7 @@ function addAccount(login) {
         return realFetch(url, opts);
     };
     let brokerErr = null;
-    try { await deployer.createSession({ onLog: () => {} }); } catch (e) { brokerErr = e; }
+    try { await deployer.createSession({ dataPlane: 'v1', onLog: () => {} }); } catch (e) { brokerErr = e; }
     t('a broker outage fails without condemning any account',
         !!brokerErr
         && accounts.get(b1.id).health !== accounts.HEALTH.EXHAUSTED

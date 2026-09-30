@@ -1037,7 +1037,7 @@ function aeView(p) {
         return { tone: 'on', head: 'وصل است', line: bits.join(' · ') };
     }
     if (mine && failed) {
-        return { tone: 'bad', head: 'وصل نشد', line: aeEsc(st.stageFa || 'اتصال ناموفق بود — دوباره امتحان کنید.') };
+        return { tone: 'bad', head: 'وصل نشد', line: aeEsc(st.stageFa || 'اتصال ناموفق بود — دوباره امتحان کنید.') + (st.hint ? '<br><b>راه‌حل:</b> ' + aeEsc(st.hint) : '') };
     }
     if (mine && (st.running || aeBusy)) {
         const bits = [aeEsc(st.stageFa || 'در حال راه‌اندازی')];

@@ -25,7 +25,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const src = fs.readFileSync(path.resolve(__dirname, '../../server.js'), 'utf8');
+const src = fs.readFileSync(path.resolve(__dirname, '../../server.js'), 'utf8').replace(/\r\n/g, '\n');
 const results = [];
 const t = (name, pass, detail) => results.push({ name, pass, detail });
 

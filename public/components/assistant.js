@@ -18,8 +18,9 @@
 // THE THREE PRIORITIES ARE THREE DIFFERENT MEASUREMENTS, not three labels on one:
 //   سرعت اسکن     — tcping only (no core at all), one port, huge concurrency. Fastest to an
 //                   answer; it proves the port answers, not that traffic passes.
-//   سرعت کانفیگ‌ها — real throughput through the core, in KB/s, against Cloudflare's own sink
-//                   (xray-tester.js › realSpeed). Ranked fastest first.
+//   سرعت کانفیگ‌ها — the living first (real delay), then real throughput through the core, in
+//                   KB/s, from a download OUTSIDE Cloudflare (verifySpeed; why outside is in
+//                   xray-tester.js › DEFAULT_SPEED_URL). Ranked fastest first.
 //   پایداری        — the real delay measured THREE times; only nodes that answered all three
 //                   survive, ranked by how little they wandered (jitter), then by mean.
 // Pick differently and you get a different list. That was the requirement.
@@ -362,7 +363,7 @@
         // is. A FINISHED one is not: reopening after «نه» used to show the dead transcript with
         // no buttons under it, which reads as broken.
         const LIVE = ['offer', 'decay', 'pick', 'count', 'mode', 'ask-engines', 'racing', 'race-done', 'run', 'done',
-            'trouble', 'diagnosing', 'diag-done'];
+            'stalled', 'trouble', 'diagnosing', 'diag-done'];
         if (LIVE.indexOf(st.step) >= 0) return;
         if (findOffer(false)) { offerIfAny(true); return; }
         st.step = 'home';
@@ -586,6 +587,12 @@
               `).join('')}</div>
               <div class="as-act"><button type="button" class="mv-btn" data-as="stop">توقف</button></div>`;
         }
+        if (st.step === 'stalled') {
+            return `<div class="as-act">
+                <button type="button" class="mv-btn mv-btn--primary" data-as="stall-again">یک دور دیگر</button>
+                <button type="button" class="mv-btn" data-as="go-cloud">باز کردن زیرساخت ابری</button>
+              </div>`;
+        }
         if (st.step === 'done') {
             return `<div class="as-act">
                 <button type="button" class="mv-btn mv-btn--primary" data-as="copy"><i class="ph-bold ph-copy"></i> کپی کانفیگ‌های تمیز</button>
@@ -786,6 +793,14 @@
             return;
         }
         if (what === 'stop') { st.cancelled = true; sub('در حال توقف…'); return; }
+        if (what === 'stall-again') {
+            if (!st.offer || !st.mode || !st.want || st.running) return;
+            say('یک دور دیگر', 'me');
+            st.step = 'run';
+            await saysSlowly(`باشد — از اول می‌گردم، با همان <b class="as-num">${fa(st.want)}</b> کانفیگ و <b>${esc(st.mode.label)}</b>.`);
+            run().catch(err => fail(err && err.message));
+            return;
+        }
         if (what === 'copy') {
             if (typeof window.copyText === 'function') window.copyText(st.result.join('\n'));
             else navigator.clipboard.writeText(st.result.join('\n'));
@@ -939,7 +954,12 @@
         // NEVER INTERRUPT A CONVERSATION THAT IS UNDER WAY. The slow sweep used to reset the
         // thread to the opening question while the user was picking a number, because it only
         // checked for `step === 'run'` — every fifteen seconds, the questions started again.
-        if (st.running || st.step === 'count' || st.step === 'mode' || st.step === 'run'
+        // 'stalled' too: the run did not mark its group as combined, so without this the sweep
+        // re-offered that same group fifteen seconds later, over the explanation of why it stopped.
+        // And 'pick': the group picker is a choice in progress like the count, and the sweep
+        // replaced it — ticks and all — with the offer for whichever group was not yet combined.
+        if (st.running || st.step === 'pick' || st.step === 'count' || st.step === 'mode' || st.step === 'run'
+            || st.step === 'stalled'
             || st.step === 'ask-engines' || st.step === 'racing' || st.step === 'race-done'
             || st.step === 'trouble' || st.step === 'diagnosing' || st.step === 'diag-done') return;
         const o = findOffer(false);
@@ -994,6 +1014,28 @@
     const BATCH_IPS = 4000;      // addresses per sweep — a few thousand is plenty
     const VERIFY_CHUNK = 40;     // how many go into the real test at once
     const MAX_DRY = 4;           // sweeps with nothing alive before the hunt gives up
+    // Addresses put through the real test without ONE passing. Past this the run stops and says
+    // what it saw, instead of sweeping and testing forever — see the `stalled` branch in run().
+    const STALL_AFTER = 160;
+
+    /**
+     * Where «سرعت کانفیگ‌ها» downloads from, in order.
+     *
+     * The first is xray-tester's own default (DEFAULT_SPEED_URL), and why it is Google's
+     * download server rather than speed.cloudflare.com is written down there: the Edge worker
+     * never forwards speed.cloudflare.com, so every address «failed» and the run looped forever.
+     * The next one is tried only after the one before has PROVABLY failed through this worker —
+     * addresses that had just answered the delay test, and not one download came back (see
+     * verifySpeed). speed.cloudflare.com stays last because it is what this used to be: any
+     * config it worked for still has it.
+     */
+    const SPEED_SINKS = [
+        { url: 'http://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb', name: 'سرور دانلود گوگل' },
+        { url: 'http://cachefly.cachefly.net/1mb.test', name: 'CacheFly' },
+        { url: 'https://speed.cloudflare.com/__down?bytes=1500000', name: 'سرور تست سرعت کلادفلر' },
+    ];
+    const SPEED_LANES = 3;       // downloads at once — a download shares the user's line
+    const SINK_EVIDENCE = 3;     // live addresses that must get nothing before a target is blamed
 
     /**
      * Is the line itself working?
@@ -1035,8 +1077,31 @@
         let hunting = true;
         let sweeps = 0;
         let dry = 0;
+        // Addresses that have been through the real test, and how many of those answered at
+        // least its first request. Both only ever grow: they are the progress line, and what
+        // the stall check reads.
+        let measured = 0;
+        let carried = 0;
+        let stalled = false;
+        let broke = null;            // a worker threw: the other one must stop too
+        // «سرعت کانفیگ‌ها» only — which download target is in use, whether it has delivered
+        // yet, the live addresses it has failed so far, and whether every target has failed
+        // (then the ranking falls back to the delay already measured). See verifySpeed.
+        const sp = { sink: 0, proven: false, held: [], fallback: false };
+        const better = () => (sp.fallback ? 'low' : mode.better);
+        const unit = () => (sp.fallback ? 'ms' : mode.unit);
 
-        const enough = () => good.length >= needIps || st.cancelled;
+        const enough = () => good.length >= needIps || st.cancelled || stalled || !!broke;
+
+        // ONE BAR, ONE MEANING. The bar used to show the chunk under test (x / 40) and, between
+        // chunks, the confirmed count (x / 20): the same line jumping between two unrelated
+        // numbers, which is all the user could see while nothing was passing. The bar is now
+        // confirmed / needed and never moves backwards; the running count of addresses measured
+        // is the proof that work is being done.
+        const showVerify = () => stage('verify', 'active',
+            `${num(fa(Math.min(good.length, needIps)) + ' / ' + fa(needIps))} تأیید شد · ${num(fa(measured))} سنجیده`,
+            Math.min(100, Math.round(good.length / needIps * 100)));
+        const onMeasured = (ok) => { measured++; if (ok) carried++; showVerify(); };
 
         // ── worker 1: keep finding clean addresses ──────────────────────────
         async function hunter() {
@@ -1053,9 +1118,11 @@
                 const before = queue.length + good.length;
                 await sweep(ipsText, mode, (fresh) => {
                     fresh.forEach(r => {
-                        const key = r.ip + ':' + r.port;
-                        if (tried.has(key)) return;
-                        tried.add(key);
+                        // By ADDRESS, not address:port. combineOne keeps the raw config's own
+                        // port, so an address that answered on both 443 and 8443 became two
+                        // identical configs — tested twice, and deliverable twice.
+                        if (tried.has(r.ip)) return;
+                        tried.add(r.ip);
                         queue.push(r);
                     });
                 }, () => enough());
@@ -1099,18 +1166,38 @@
                     continue;
                 }
                 const chunk = queue.splice(0, VERIFY_CHUNK);
-                stage('verify', 'active', `${num(fa(good.length) + ' / ' + fa(needIps))} تأیید شد`,
-                    Math.min(100, Math.round(good.length / needIps * 100)));
-                const survivors = await verify(chunk, raws[0], mode);
+                const before = measured;
+                showVerify();
+                const survivors = mode.testType === 'speed'
+                    ? await verifySpeed(chunk, raws[0], sp, onMeasured)
+                    : await verify(chunk, raws[0], mode, onMeasured);
+                // Every address in the chunk has now been examined, whether or not the tester
+                // sent a line for each — so a tester that answers nothing still counts toward
+                // the stall below instead of looping under it.
+                measured = Math.max(measured, before + chunk.length);
                 survivors.forEach(x => good.push(x));
-                good.sort((a, b) => (mode.better === 'high' ? b.score - a.score : a.score - b.score));
-                stage('verify', 'active', `${num(fa(Math.min(good.length, needIps)) + ' / ' + fa(needIps))} تأیید شد`,
-                    Math.min(100, Math.round(good.length / needIps * 100)));
+                good.sort((a, b) => (better() === 'high' ? b.score - a.score : a.score - b.score));
+                showVerify();
+                // NOTHING PASSING IS AN ANSWER, NOT A REASON TO KEEP GOING. Before this, a run
+                // in which no address could pass looped for as long as the app stayed open: the
+                // hunter kept finding addresses that answer on the port, the tester kept failing
+                // them, and the card kept filling the same bar.
+                if (!good.length && measured >= STALL_AFTER) stalled = true;
             }
             stage('verify', 'done', num(fa(Math.min(good.length, needIps)) + ' / ' + fa(needIps)));
         }
 
-        await Promise.all([hunter(), tester()]);
+        // A worker that throws must stop the other one as well. Without this, a failed address
+        // list left the tester polling an empty queue forever (the hunter never got to say it
+        // had stopped), and a failed test left the hunter sweeping under an error message.
+        const guard = (fn) => fn().catch((e) => { broke = broke || e; });
+        await Promise.all([guard(hunter), guard(tester)]);
+        if (broke) {
+            try { await fetch('/api/stop', { method: 'POST' }); } catch (e) {}
+            const t = typeof tabs !== 'undefined' && tabs.find(x => x && x._assistant);
+            if (t && t.state === 'running') t.state = 'done';
+            throw broke;
+        }
 
         // A run that stopped because the line is dead, or because sweep after sweep came back
         // empty, is not the same as the user pressing «توقف» — and answering all three with
@@ -1132,6 +1219,21 @@
             await saysSlowly('باشد، نگه داشتم. هر وقت خواستید از همین‌جا دوباره شروع می‌کنیم.');
             return;
         }
+        if (stalled) {
+            busy(false); st.running = false; st.step = 'stalled';
+            sub('نگه داشتم');
+            // What was seen, in the order it was seen — no cause is claimed that was not measured.
+            await saysSlowly(carried
+                ? `<b>${num(fa(measured))} آدرس</b> را با این کانفیگ سنجیدم. ${num(fa(carried))} تا به یک درخواست ساده جواب دادند، ولی هیچ‌کدام از آزمونِ «${esc(mode.label)}» رد نشد.`
+                : `<b>${num(fa(measured))} آدرس</b> را که پورتشان باز بود با این کانفیگ امتحان کردم، و از هیچ‌کدام حتی یک درخواست ساده رد نشد.`);
+            await saysSlowly('با همین وضع ادامه دادن فقط وقت می‌گیرد، پس نگه داشتم — به‌جای اینکه بی‌صدا ادامه بدهم.');
+            if (await tlsfpOn()) {
+                await saysSlowly('«<b>رفع فیلتر کانفیگ‌ها (کلادفلر)</b>» در تنظیمات › شبکه روشن است. این کلید شکلِ دست‌دهی TLS را عوض می‌کند، و روی بعضی خط‌ها همین جلوی عبور را می‌گیرد. خاموشش کنید و «یک دور دیگر» را بزنید تا معلوم شود.');
+            } else {
+                await saysSlowly('خودِ کانفیگ را یک بار در پنل V2Ray وصل کنید. اگر آنجا هم وصل نشد، ایراد از خودِ ورکر است و اسکنِ بیشتر کمکی نمی‌کند.');
+            }
+            return;
+        }
 
         // ── combine and deliver exactly what was asked for ──────────────────
         stage('combine', 'active', '', null);
@@ -1149,7 +1251,7 @@
         }
         st.result = out;
         st.resultSrc = outSrc;
-        st.groupId = saveToCombo(out, picked, mode);
+        st.groupId = saveToCombo(out, picked, mode, unit());
         stage('combine', 'done', `${num(fa(out.length))} کانفیگ`);
 
         busy(false);
@@ -1159,7 +1261,7 @@
 
         const best = picked[0];
         await saysSlowly(`تمام شد — <b class="as-num">${fa(out.length)}</b> کانفیگ تمیز آماده است.` +
-            (best ? ` بهترینشان <span class="as-num" dir="ltr">${esc(best.ip)}</span> با <span class="as-num" dir="ltr">${fa(best.score)} ${esc(mode.unit)}</span> است.` : ''));
+            (best ? ` بهترینشان <span class="as-num" dir="ltr">${esc(best.ip)}</span> با <span class="as-num" dir="ltr">${fa(best.score)} ${esc(unit())}</span> است.` : ''));
         await saysSlowly('یک نسخه هم در «مرکز ترکیب» ذخیره شد، پس اگر پنجره را ببندید چیزی از دست نمی‌رود.');
         if (typeof window.triggerNotification === 'function') {
             window.triggerNotification('assistantDone', 'دستیار MLM VPN', `${out.length} کانفیگ تمیز آماده شد و در مرکز ترکیب ذخیره شد.`);
@@ -1279,23 +1381,22 @@
      * step that separates "the port answered" from "traffic actually passes", and it is where
      * the three priorities stop being labels:
      *   ping  → no core at all, one shot
-     *   speed → KB/s through the core (xray-tester › realSpeed)
+     *   speed → KB/s through the core — its own function, verifySpeed below
      *   delay → milliseconds, repeated `passes` times, all of which must succeed
+     *
+     * `onMeasured(ok)` is told about each address as its FIRST pass comes back; the later
+     * passes re-test the same addresses and are not counted again.
      */
-    async function verify(alive, rawConfig, mode) {
+    async function verify(alive, rawConfig, mode, onMeasured) {
         let pool = alive.slice();
         const samples = new Map();     // key → [vals]
 
         for (let pass = 0; pass < mode.passes && pool.length && !st.cancelled; pass++) {
             const nodes = pool.map((r, i) => ({ id: String(i), uri: combineOne(rawConfig, r.ip, r.port) }));
             const got = new Map();
-            let done = 0;
             await streamTest(nodes, mode.testType, (r) => {
-                done++;
-                stage('verify', 'active',
-                    mode.passes > 1 ? `دور ${num(fa(pass + 1) + ' / ' + fa(mode.passes))} · ${num(fa(done) + ' / ' + fa(nodes.length))}` : num(fa(done) + ' / ' + fa(nodes.length)),
-                    Math.round(done / nodes.length * 100));
-                if (r && r.id != null) got.set(String(r.id), r.val);
+                got.set(String(r.id), r.val);
+                if (pass === 0 && onMeasured) onMeasured(r.val > 0);
             });
             const next = [];
             pool.forEach((r, i) => {
@@ -1319,46 +1420,149 @@
         }).filter(Boolean);
     }
 
-    /** POST to the node tester and read its newline-delimited stream as it arrives. */
-    async function streamTest(nodes, testType, onResult) {
+    /**
+     * «سرعت کانفیگ‌ها»: first who carries traffic at all, then how fast the ones that do are.
+     *
+     * TWO PASSES, because a download is the one measurement that shares the user's line. Forty
+     * 1.5 MB transfers at once measure the line split forty ways rather than the addresses, and
+     * most of the forty are dead, each holding its slot to the cap. The real delay test (the one
+     * the V2Ray list uses) sorts the dead out at full width for almost nothing; only the ones
+     * that answered it download, SPEED_LANES at a time.
+     *
+     * It is also what makes a failed download readable. An address that has just answered the
+     * delay test and then cannot download is not a dead address. When SINK_EVIDENCE of them get
+     * nothing from one target — and that target has never delivered — the TARGET is what failed
+     * through this worker, and the same addresses go to the next one in SPEED_SINKS. When every
+     * target has failed, the run says so and ranks by the delay it already measured. The old
+     * single target had no such exit: through the Edge worker every address «failed», and the
+     * run went on sweeping and failing them for as long as the app stayed open.
+     */
+    async function verifySpeed(alive, rawConfig, sp, onMeasured) {
+        const nodes = alive.map((r, i) => ({ id: String(i), uri: combineOne(rawConfig, r.ip, r.port) }));
+        const ms = new Map();
+        await streamTest(nodes, 'delay', (r) => {
+            if (r.val > 0) ms.set(String(r.id), r.val);
+            onMeasured(r.val > 0);
+        }, { concurrency: VERIFY_CHUNK });
+        const live = [];
+        alive.forEach((r, i) => { if (ms.has(String(i))) live.push({ ip: r.ip, port: r.port, ms: ms.get(String(i)) }); });
+        if (!live.length || st.cancelled) return [];
+
+        const byDelay = (list) => list.map(x => ({ ip: x.ip, port: x.port, score: x.ms }));
+        if (sp.fallback) return byDelay(live);
+
+        const download = async (list, sink) => {
+            const kbps = new Map();
+            await streamTest(list.map((r, i) => ({ id: String(i), uri: combineOne(rawConfig, r.ip, r.port) })), 'speed', (r) => {
+                if (r.val > 0) kbps.set(String(r.id), r.val);
+            }, { concurrency: SPEED_LANES, pingUrl: sink.url });
+            return list.map((r, i) => (kbps.has(String(i)) ? { ip: r.ip, port: r.port, score: kbps.get(String(i)) } : null)).filter(Boolean);
+        };
+
+        let batch = live;
+        for (;;) {
+            const sink = SPEED_SINKS[sp.sink];
+            // A target that has not delivered yet is tried on a few addresses first. If it fails
+            // there, the rest of the chunk never has to wait out the cap on it — measured with the
+            // whole chunk sent at once, a refused target cost every live address its full timeout
+            // before the next target was even tried.
+            const trial = sp.proven ? batch : batch.slice(0, SINK_EVIDENCE);
+            const rest = batch.slice(trial.length);
+            let scored = await download(trial, sink);
+            if (st.cancelled) return [];
+
+            if (scored.length) {
+                sp.proven = true;
+                sp.held = [];
+                if (rest.length) scored = scored.concat(await download(rest, sink));
+                return scored;
+            }
+            // This target has delivered before, so these are addresses that carry a request but
+            // not a download — slow or dying addresses, not a failing target.
+            if (sp.proven) return [];
+
+            trial.forEach(x => { if (sp.held.indexOf(x) < 0) sp.held.push(x); });
+            if (sp.held.length < SINK_EVIDENCE) return [];
+
+            const failed = sink.name;
+            if (sp.sink + 1 < SPEED_SINKS.length) {
+                sp.sink++;
+                await saysSlowly(`دانلود آزمایشی از <b>${esc(failed)}</b> از این ورکر رد نشد، در حالی که همین آدرس‌ها به تست تأخیر جواب دادند — پس ایراد از مقصدِ دانلود است، نه از آی‌پی‌ها. با <b>${esc(SPEED_SINKS[sp.sink].name)}</b> دوباره می‌سنجم.`);
+                // Untested addresses first, so the next target is judged on FRESH ones: three
+                // flaky addresses re-tried against every target would make all of them look
+                // refused, and the run would fall back to delay for nothing.
+                batch = rest.concat(sp.held);
+                sp.held = [];
+                continue;
+            }
+            sp.fallback = true;
+            await saysSlowly(`این ورکر هیچ دانلود آزمایشی را رد نکرد — از هیچ‌کدام از ${fa(SPEED_SINKS.length)} مقصد. پس سرعت دانلود را از این راه نمی‌شود اندازه گرفت؛ به‌جایش آن‌هایی را می‌دهم که <b>کمترین تأخیر واقعی</b> را دارند.`);
+            const out = byDelay(sp.held.concat(rest));
+            sp.held = [];
+            return out;
+        }
+    }
+
+    /** Is Settings › شبکه › «رفع فیلتر کانفیگ‌ها (کلادفلر)» on? null when it cannot be read. */
+    async function tlsfpOn() {
+        try {
+            const r = await fetch('/api/tlsfp/status');
+            const d = await r.json();
+            const c = (d && d.config) || {};
+            return c.enabled !== false && c.mode !== 'off';
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * POST to the node tester and read its newline-delimited stream as it arrives.
+     *
+     * Only per-node lines reach `onResult`. A `fatal` line is the TESTER failing (no free port,
+     * no core) — a different thing from every address failing — so it is thrown once the stream
+     * ends rather than fed to the caller as if it were a verdict on an address.
+     */
+    async function streamTest(nodes, testType, onResult, settings) {
         const res = await fetch('/api/v2ray/test-nodes', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ nodes, testType, settings: { concurrency: 30 } }),
+            body: JSON.stringify({ nodes, testType, settings: Object.assign({ concurrency: 30 }, settings) }),
         });
+        if (!res.ok) throw new Error(`تست کانفیگ‌ها اجرا نشد (خطای سرور ${res.status})`);
+        let fatal = null;
+        const take = (line) => {
+            if (!line.trim()) return;
+            let obj = null;
+            try { obj = JSON.parse(line); } catch (e) { return; }
+            if (obj.fatal) { fatal = obj.error || 'تست کانفیگ‌ها اجرا نشد'; return; }
+            if (obj.done || obj.id == null) return;
+            onResult(obj);
+        };
         if (!res.body || !res.body.getReader) {
-            const txt = await res.text();
-            txt.split('\n').filter(Boolean).forEach(l => { try { onResult(JSON.parse(l)); } catch (e) {} });
-            return;
-        }
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let buf = '';
-        for (;;) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            const lines = buf.split('\n');
-            buf = lines.pop();
-            for (const line of lines) {
-                if (!line.trim()) continue;
-                let obj = null;
-                try { obj = JSON.parse(line); } catch (e) { continue; }
-                if (obj.done || obj.fatal) continue;
-                onResult(obj);
+            (await res.text()).split('\n').forEach(take);
+        } else {
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = '';
+            for (;;) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buf += dec.decode(value, { stream: true });
+                const lines = buf.split('\n');
+                buf = lines.pop();
+                lines.forEach(take);
+                if (st.cancelled) { try { reader.cancel(); } catch (e) {} break; }
             }
-            if (st.cancelled) { try { reader.cancel(); } catch (e) {} break; }
         }
+        if (fatal) throw new Error(fatal);
     }
 
     /** The same rewrite the combination centre does: swap the host for a clean IP, tag it. */
     function combineOne(raw, ip, port) {
-        let out = String(raw).replace(/@([a-zA-Z0-9.\-]+):(\d+)/, '@' + ip + ':$2');
-        if (out.includes('#')) out = out + encodeURIComponent(' [' + ip + ']');
-        else out = out + '#' + ip;
-        return out;
+        // cf-uri.js: IPv6 in brackets, the name pinned into sni/host (see combo.js).
+        return window.CfUri.rewrite(String(raw), ip, null, true);
     }
 
-    function saveToCombo(configs, picked, mode) {
+    function saveToCombo(configs, picked, mode, unit) {
         const groups = comboGroups();
         const id = 'combo_' + Date.now();
         const byIp = new Map(picked.map(p => [p.ip, p]));
@@ -1367,7 +1571,7 @@
             title: `دستیار MLM VPN — ${st.offer.label}`,
             date: new Date().toLocaleString('fa-IR'),
             nodes: configs.map((c, i) => {
-                const ip = (c.match(/@([\d.]+):/) || [])[1] || '';
+                const ip = window.CfUri.addressOf(c) || '';
                 const p = byIp.get(ip);
                 // The node's `sni` is the BASE GROUP it came from, not a display label —
                 // findOffer and pickList both dedup against it, so when several groups are
@@ -1378,7 +1582,7 @@
             // What it took to make this, so it can be made again when the addresses die:
             // the raw configs themselves (a handful of URIs) and which base group they came from.
             metadata: {
-                assistant: true, mode: mode.id, unit: mode.unit,
+                assistant: true, mode: mode.id, unit: unit || mode.unit,
                 baseId: st.offer.id, label: st.offer.label, raws: st.offer.configs.slice(0, 40),
             },
         });

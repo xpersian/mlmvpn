@@ -208,7 +208,9 @@ function forgetAccount() {
 
 /** Store a secret the user pasted in (a Plus account, or one moved from another device). */
 function saveSecret(secret) {
-    const s = String(secret || '').trim();
+    // Digits only when it looks like a code (spaces, dashes, Persian digits); anything else is kept
+    // as typed and the broker says whether it is an account.
+    const s = normalizeSecret(secret) || String(secret || '').trim();
     if (!s) throw new Error('کد حساب خالی است.');
     // No format check. Upstream does not document one, and refusing a credential because it does
     // not match a pattern we invented would be worse than letting the daemon say it is wrong.
@@ -224,8 +226,42 @@ function saveSecret(secret) {
  * @param opts.region   a two-letter country code, or 'auto'
  * @param opts.dryRun   true for the query engine — talks to the broker, tunnels nothing
  */
+/**
+ * «گف»'s own settings (Android 1.2.36 › ۵, GephSettings.kt) — each a field of the engine's config,
+ * each default the official app's, so a user who never opens them gets Geph exactly as before.
+ *   allowDirect  race a direct, unobfuscated dial to the exit against the bridges
+ *   blockAds / blockAdult  the exit's own blocklists (sess_metadata.filter, as gephgui sends it)
+ *   forwards     [{listen: '127.0.0.1:PORT', connect: 'host:port'}] — a local port to one host via Geph
+ * (Android's spoof_dns is NOT offered here: see the comment on that field below — sing-box owns DNS.)
+ */
+const SETTINGS_FILE = path.join(GEPH_DATA_DIR, 'settings.json');
+const SETTING_DEFAULTS = { allowDirect: false, blockAds: false, blockAdult: false, forwards: [] };
+function validForward(f) {
+    return !!(f && /^(127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d{2,5}$/.test(String(f.listen || '')) && /^[\w.-]+:\d{1,5}$/.test(String(f.connect || '')));
+}
+function settings() {
+    let s = {};
+    try { s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); } catch (e) { s = {}; }
+    const out = Object.assign({}, SETTING_DEFAULTS, s);
+    out.forwards = (Array.isArray(out.forwards) ? out.forwards : []).filter(validForward);
+    return out;
+}
+function saveSettings(patch) {
+    const next = Object.assign({}, settings());
+    for (const k of ['allowDirect', 'blockAds', 'blockAdult']) if (patch && k in patch) next[k] = !!patch[k];
+    if (patch && Array.isArray(patch.forwards)) {
+        const bad = patch.forwards.filter((f) => !validForward(f));
+        if (bad.length) throw new Error('فوروارد نامعتبر: «' + (bad[0].listen || '') + ' → ' + (bad[0].connect || '') + '» — شکل درست: 127.0.0.1:PORT → host:port');
+        next.forwards = patch.forwards.map((f) => ({ listen: String(f.listen), connect: String(f.connect) }));
+    }
+    ensureDataDir();
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2), 'utf8');
+    return next;
+}
+
 function configObject(opts = {}) {
     const dry = !!opts.dryRun;
+    const set = dry ? SETTING_DEFAULTS : settings();
     const cc = String(opts.region || 'auto').trim().toLowerCase();
     return {
         // The query engine publishes NO proxies. Two clients sharing 20850 would mean the second
@@ -251,7 +287,8 @@ function configObject(opts = {}) {
         // FALSE on purpose. `allow_direct` lets the client connect straight to an exit instead of
         // through a bridge; on a line that blocks the exits that is a pause with nothing at the end
         // of it, and on a line that does not, the bridges work anyway.
-        allow_direct: false,
+        // …unless the user turns it on in «گف»'s settings (settings() above), as on Android.
+        allow_direct: !!set.allowDirect,
         // A FILE, NOT A DIRECTORY — and that distinction is not cosmetic. `cache` is handed
         // straight to SQLite as the database path (client/database.rs), so a directory here fails
         // with `unable to open database file (code: 526)` and the daemon exits one second after
@@ -264,7 +301,7 @@ function configObject(opts = {}) {
         broker: BROKER_SOURCE,
         tunneled_broker: TUNNELED_BROKER,
         broker_keys: BROKER_KEYS,
-        port_forward: [],
+        port_forward: dry ? [] : set.forwards.map((f) => ({ listen: f.listen, connect: f.connect })),
         // FALSE, and this one matters. `spoof_dns` answers lookups inside the client with fake
         // addresses it then maps back — useful for a VPN that owns the whole stack, wrong here:
         // sing-box already owns DNS when the full tunnel is up, and in proxy mode the application
@@ -273,7 +310,9 @@ function configObject(opts = {}) {
         passthrough_china: false,
         dry_run: dry,
         credentials: credential(),
-        sess_metadata: {},
+        // The exit reads only `filter` from the session metadata (geph5-exit proxy.rs); the official
+        // GUI sends exactly this shape.
+        sess_metadata: dry ? {} : { filter: { nsfw: !!set.blockAdult, ads: !!set.blockAds } },
         task_limit: null,
     };
 }
@@ -467,46 +506,157 @@ async function registerAccount({ onLog, onProgress } = {}) {
  * Whichever client is already running answers; if none is, a `dry_run` one is started just for this
  * and killed again.
  */
+/**
+ * One `broker_rpc` call, answered by whichever client is already running, or by a `dry_run` one
+ * started for it and killed again (upstream's manager.rs asks the same way). The broker's
+ * `Result` comes back unwrapped: `{Ok: v}` → v, `{Err: e}` → thrown.
+ */
+let brokerLock = Promise.resolve();
+const PORT_TROUBLE = /ECONNREFUSED|ECONNRESET|timeout|تایم|socket|closed/i;
+function unwrapResult(raw) {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === 1) {
+        if ('Ok' in raw) return raw.Ok;
+        if ('Err' in raw) throw new Error(String(typeof raw.Err === 'string' ? raw.Err : JSON.stringify(raw.Err)));
+    }
+    return raw;
+}
+function brokerCall(method, params, { timeoutMs = 20000 } = {}) {
+    const run = async () => {
+        if (state.running) {
+            try { return unwrapResult(await rpc('broker_rpc', [method, params], { port: CTRL_PORT, timeoutMs })); }
+            catch (e) { if (!PORT_TROUBLE.test(e.message)) throw e; }
+        }
+        const qport = CTRL_PORT + 1;
+        const cfgFile = writeConfig({ dryRun: true });
+        killProc(queryProc);
+        queryProc = spawn(binPath(), ['--config', cfgFile], { windowsHide: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+        try {
+            const deadline = Date.now() + 25000 + timeoutMs;
+            let lastErr = null;
+            while (Date.now() < deadline) {
+                if (queryProc.exitCode !== null) throw new Error('موتور گف برای پرسیدن از سرور بالا نیامد.');
+                try { return unwrapResult(await rpc('broker_rpc', [method, params], { port: qport, timeoutMs: Math.max(5000, timeoutMs) })); }
+                catch (e) {
+                    lastErr = e;
+                    // An answer from the broker (not a dead port) is the answer: no point asking again.
+                    if (!PORT_TROUBLE.test(e.message)) throw e;
+                }
+                await new Promise(r => setTimeout(r, 800));
+            }
+            throw lastErr || new Error('سرور گف جواب نداد.');
+        } finally {
+            killProc(queryProc);
+            queryProc = null;
+        }
+    };
+    // One query engine at a time: two would fight over the same control port.
+    const p = brokerLock.then(run, run);
+    brokerLock = p.catch(() => {});
+    return p;
+}
+
+/**
+ * What the broker says about the stored account.
+ *
+ * There is NO `user_info` control method — the control protocol is the eleven calls in
+ * `client_control.rs` and nothing else. The account is asked for the way upstream's own manager asks
+ * (`manager.rs::account_for_secret`): `broker_rpc('get_user_info_by_cred', [credential])`.
+ *
+ * Levels as Android 1.2.36 shows them: `UserInfo` has no `level` — Plus is an expiry in the future;
+ * a paid plan WITH a monthly allowance (`bw_consumption`) is Basic; anything else is Free.
+ */
 async function accountInfo() {
     if (!hasAccount()) return { ok: false, error: 'هنوز حسابی ساخته نشده.' };
-    const params = ['get_user_info_by_cred', [credential()]];
-
-    const ask = async (port, timeoutMs) => {
-        const raw = await rpc('broker_rpc', params, { port, timeoutMs });
-        // The broker answers Result<Option<UserInfo>>: null means the credential is not an account.
-        if (!raw) throw new Error('این کد حساب شناخته نشد.');
-        const info = raw.Ok !== undefined ? raw.Ok : raw;
-        if (!info) throw new Error('این کد حساب شناخته نشد.');
-        // `UserInfo` carries no `level`: it is {user_id, plus_expires_unix, recurring,
-        // bw_consumption}. Plus is an expiry in the future and nothing else — an expiry in the past
-        // is an account that WAS Plus, which is free now.
-        const exp = Number(info.plus_expires_unix) || 0;
-        state.level = exp * 1000 > Date.now() ? 'plus' : 'free';
-        state.plusExpires = exp || null;
-        return { ok: true, info, level: state.level };
-    };
-
-    if (state.running) {
-        try { return await ask(CTRL_PORT, 15000); } catch (e) { /* fall back to a query engine */ }
-    }
-
-    const qport = CTRL_PORT + 1;
-    const cfgFile = writeConfig({ dryRun: true });
-    killProc(queryProc);
-    queryProc = spawn(binPath(), ['--config', cfgFile], { windowsHide: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
     try {
-        const deadline = Date.now() + 25000;
-        let lastErr = null;
-        while (Date.now() < deadline) {
-            if (queryProc.exitCode !== null) return { ok: false, error: 'موتور برای پرسیدن حساب بالا نیامد.' };
-            try { return await ask(qport, 5000); } catch (e) { lastErr = e; }
-            await new Promise(r => setTimeout(r, 800));
-        }
-        return { ok: false, error: (lastErr && lastErr.message) || 'سرور دربارهٔ این حساب جواب نداد.' };
-    } finally {
-        killProc(queryProc);
-        queryProc = null;
+        const info = await brokerCall('get_user_info_by_cred', [credential()], { timeoutMs: 15000 });
+        if (!info) return { ok: false, error: 'این کد حساب شناخته نشد.' };
+        const exp = Number(info.plus_expires_unix) || 0;
+        const bw = info.bw_consumption || null;
+        state.level = exp * 1000 <= Date.now() ? 'free' : (bw && bw.mb_limit != null ? 'basic' : 'plus');
+        state.plusExpires = exp || null;
+        const out = {
+            ok: true, info, level: state.level,
+            usage: bw ? { usedMb: Number(bw.mb_used) || 0, limitMb: bw.mb_limit != null ? Number(bw.mb_limit) : null, renewUnix: Number(bw.renew_unix) || null } : null,
+            canRotate: String(readAccount().secret || '').startsWith('9'),
+        };
+        writeAccount(Object.assign(readAccount(), { info: { level: out.level, usage: out.usage, plusExpires: exp || null, userId: info.user_id, at: Date.now() } }));
+        return out;
+    } catch (e) {
+        return { ok: false, error: e.message || 'سرور دربارهٔ این حساب جواب نداد.' };
     }
+}
+
+/** Digits only (Persian digits too): people paste codes with spaces or dashes. 16–40 digits. */
+function normalizeSecret(input) {
+    const d = String(input || '').replace(/[۰-۹]/g, (c) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(c))).replace(/\D/g, '');
+    return d.length >= 16 && d.length <= 40 ? d : null;
+}
+
+/** Is `secret` a live account code, one that was replaced by a newer one, or nothing? */
+async function secretStatus(secret) {
+    const a = await brokerCall('get_account_secret_status', [secret], { timeoutMs: 15000 });
+    if (typeof a === 'string') return /retired/i.test(a) ? { status: 'retired' } : { status: 'invalid' };
+    if (a && a.current) return { status: 'current', userId: a.current.user_id || null };
+    return { status: 'invalid' };
+}
+
+/**
+ * Replace the account code (first-generation codes, starting with 9, only). The old one stops
+ * working everywhere — so the new one is saved here the moment it arrives.
+ */
+async function rotateSecret() {
+    const old = String(readAccount().secret || '');
+    if (!old.startsWith('9')) throw new Error('فقط کدهای نسل اول (که با ۹ شروع می‌شوند) عوض می‌شوند.');
+    const a = await brokerCall('rotate_account_secret', [old], { timeoutMs: 30000 });
+    const fresh = normalizeSecret(a);
+    if (!fresh) throw new Error('سرور کد تازه‌ای نداد.');
+    try { fs.rmSync(CACHE_DIR, { recursive: true, force: true }); } catch (e) { /* keyed to the old code */ }
+    writeAccount({ secret: fresh, at: Date.now() });
+    return fresh;
+}
+
+/** A free voucher the network is handing this account right now, or null. */
+async function freeVoucher() {
+    const secret = readAccount().secret;
+    if (!secret) throw new Error('هدیه فقط برای حساب با کد است.');
+    const o = await brokerCall('get_free_voucher', [secret]);
+    if (!o || !o.code) return null;
+    return { code: String(o.code), explanation: o.explanation || {} };
+}
+
+/** Redeem a voucher (gift) code; the answer is how many days it added. */
+async function redeemVoucher(code) {
+    const secret = readAccount().secret;
+    if (!secret) throw new Error('هدیه فقط برای حساب با کد است.');
+    const c = String(code || '').trim();
+    if (!c) throw new Error('کد هدیه خالی است.');
+    let days;
+    try { days = await brokerCall('redeem_voucher', [secret, c], { timeoutMs: 30000 }); }
+    catch (e) {
+        // The broker answers in English («Failed to redeem voucher: giftcard already used!», measured).
+        if (/already used/i.test(e.message)) throw new Error('این کد هدیه قبلاً استفاده شده است.');
+        if (/not found|invalid|no such|unknown/i.test(e.message)) throw new Error('این کد هدیه معتبر نیست.');
+        throw new Error('کد هدیه پذیرفته نشد: ' + e.message);
+    }
+    return Number(days) || 0;
+}
+
+/** Geph's own announcements, in Persian when the network has them. */
+async function news(lang = 'fa') {
+    let arr = null;
+    try { arr = await brokerCall('get_news', [lang]); } catch (e) { arr = null; }
+    if ((!Array.isArray(arr) || !arr.length) && lang !== 'en') { try { arr = await brokerCall('get_news', ['en']); } catch (e) { arr = null; } }
+    return (Array.isArray(arr) ? arr : [])
+        .map((o) => ({ title: String(o.title || ''), date: Number(o.date_unix) || 0, contents: String(o.contents || ''), important: !!o.important }))
+        .sort((a, b) => b.date - a.date);
+}
+
+/** An account from before Geph5: username and password (upstream's `legacy_username_password`). */
+function saveLegacy(username, password) {
+    const u = String(username || '').trim(), p = String(password || '');
+    if (!u || !p) throw new Error('نام کاربری و رمز هر دو لازم است.');
+    writeAccount({ username: u, password: p, at: Date.now() });
+    return true;
 }
 
 // ============================================================
@@ -524,6 +674,11 @@ const LISTEN_TIMEOUT_MS = 25_000;
  * attempt is not reported as a failure the user has to retry by hand.
  */
 const DATA_TIMEOUT_MS = 90_000;
+
+let restartCount = 0;
+let restartWindowAt = 0;
+let restarting = false;
+let stopGen = 0;   // bumped by every user stop; a pending restart from before it is dropped
 
 async function startGeph(opts = {}, onLog, onStatus) {
     if (!isInstalled()) throw new Error('فایل گف در core/geph موجود نیست.');
@@ -571,14 +726,41 @@ async function startGeph(opts = {}, onLog, onStatus) {
     proc.stderr.on('data', feed);
 
     let exited = null;
+    const wasConnected = () => state.connected;
     proc.on('exit', (code) => {
         exited = code;
         if (state.running) {
+            const hadSession = wasConnected();
             state.running = false;
             state.connected = false;
             state.error = `موتور بسته شد (کد ${code}). ${tail.slice(-2).join(' | ')}`.trim();
             record(state.error, onLog);
             push(onStatus);
+            // RESTART, KEEPING THE TUNNEL (Android 1.2.36 › ۵): the engine dying under a live
+            // session is brought back on the same ports, up to four times in a row, so whatever
+            // rides it (the system proxy, a full tunnel) sees a short gap instead of a dead engine.
+            // A clean run of ten minutes resets the count. Not after a user's stop (running false
+            // before the exit) and not while starting (that failure is the caller's answer).
+            if (hadSession && !restarting) {
+                const now = Date.now();
+                if (now - restartWindowAt > 10 * 60 * 1000) { restartCount = 0; restartWindowAt = now; }
+                if (restartCount < 4) {
+                    restartCount++;
+                    restarting = true;
+                    const gen = stopGen;
+                    record(`راه‌اندازی دوبارهٔ خودکار موتور (${restartCount} از ۴)…`, onLog);
+                    setTimeout(() => {
+                        if (gen !== stopGen) { restarting = false; return; }
+                        proc = null;
+                        startGeph(opts, onLog, onStatus)
+                            .then(() => record('موتور دوباره وصل شد.', onLog))
+                            .catch((e) => record('راه‌اندازی دوباره نشد: ' + e.message, onLog))
+                            .finally(() => { restarting = false; });
+                    }, 1500);
+                } else {
+                    record('موتور چهار بار پشت سر هم بسته شد — دوباره راه‌اندازی نمی‌شود. «اتصال» را دوباره بزنید.', onLog);
+                }
+            }
         }
     });
 
@@ -661,14 +843,45 @@ async function readConnInfo(onLog, onStatus) {
 }
 
 let connWatch = null;
+/**
+ * The stall test (Android 1.2.36 › ۵ «تست گیر کردن ارسال بدون دریافت»): a session that keeps
+ * SENDING while nothing comes back is dead even though the engine still says Connected. Every 15 s
+ * the engine's own byte counters are read; when at least 64 KB went out and under 2 KB came back,
+ * one real TLS handshake through the tunnel decides. If that fails too, the engine process is ended
+ * and the auto-restart above brings it back on the same ports (up to four times), so whatever rides
+ * it sees a short gap instead of a silent hang. Not a guess from one quiet window: it takes both.
+ */
+const STALL_TX = 64 * 1024, STALL_RX = 2 * 1024;
+let stallMark = null, stallTick = 0, stallChecking = false;
+async function stallCheck(onLog) {
+    if (!state.connected || stallChecking) return;
+    const s = await liveStats().catch(() => null);
+    if (!s || typeof s.rxBytes !== 'number' || typeof s.txBytes !== 'number') return;
+    const prev = stallMark;
+    stallMark = { rx: s.rxBytes, tx: s.txBytes };
+    if (!prev || s.txBytes < prev.tx || s.rxBytes < prev.rx) return;   // first read, or counters reset by a restart
+    if (s.txBytes - prev.tx < STALL_TX || s.rxBytes - prev.rx >= STALL_RX) return;
+    stallChecking = true;
+    try {
+        record(`ارسال بدون دریافت: ${Math.round((s.txBytes - prev.tx) / 1024)} کیلوبایت رفت و تقریباً چیزی برنگشت — آزمون واقعی…`, onLog);
+        const ok = await socksCarriesStream(15000);
+        if (ok || !state.running) { if (ok) record('آزمون واقعی رد شد — تونل سالم است.', onLog); return; }
+        record('تونل گیر کرده است (داده می‌رود و برنمی‌گردد) — موتور دوباره راه‌اندازی می‌شود.', onLog);
+        state.error = 'تونل گیر کرده بود';
+        killProc(proc);   // the exit handler restarts it (a live session, not a user's stop)
+    } finally { stallChecking = false; }
+}
+
 function watchConnInfo(onLog, onStatus) {
     clearInterval(connWatch);
+    stallMark = null; stallTick = 0;
     connWatch = setInterval(async () => {
         if (!state.running) { clearInterval(connWatch); connWatch = null; return; }
         try {
             const label = await readConnInfo(onLog, onStatus);
             if (label) record(`خروج: ${label}${state.protocol ? ` (${state.protocol})` : ''}`, onLog);
         } catch (e) { /* the port answers when it answers */ }
+        if (++stallTick % 3 === 0) stallCheck(onLog).catch(() => {});
     }, 5000);
 }
 
@@ -686,6 +899,7 @@ function portIsLive(port, timeoutMs = 1000) {
 }
 
 function stopGeph() {
+    stopGen++;
     const was = state.running;
     clearInterval(connWatch);
     connWatch = null;
@@ -1152,6 +1366,8 @@ module.exports = {
     startGeph, stopGeph, isRunning, getStatus, getLogs, isInstalled,
     socksCarriesStream,
     registerAccount, accountInfo, hasAccount, saveSecret, forgetAccount,
+    normalizeSecret, secretStatus, rotateSecret, freeVoucher, redeemVoucher, news, saveLegacy,
+    settings, saveSettings,
     regions, exits, liveStats, findFastest, lastFastest,
     SOCKS_PORT, HTTP_PORT, CTRL_PORT, GEPH_DATA_DIR,
     binPath,

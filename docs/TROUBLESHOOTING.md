@@ -30,6 +30,14 @@ what actually causes it.
 
 ---
 
+## "NSIS Error" while installing
+
+Two causes, with different wording:
+
+- **"Installer integrity check has failed"**: the installer was not downloaded completely (common on a weak line). Download it again. Since 1.2.5 the in-app updater compares the file's SHA-256 with the digest GitHub publishes for that asset and will not run a damaged file. When downloading in a browser, the digest is shown next to the file on the release page; compare it with `Get-FileHash .\file.exe` in PowerShell. The Portable build needs this too.
+- **"Error opening file for writing"**: the app or one of its engines (xray, sing-box, openvpn, tor…) is still running and Windows will not let its file be replaced. Use "Quit completely" from the tray icon and install again. Since 1.2.5 the installer itself stops every program that runs from inside the install folder before copying (only from that folder; other apps such as v2rayN are not touched).
+- **"Error launching installer"**: usually an antivirus quarantined the file or the Temp folder is full. Allow the file in your antivirus.
+
 ## The window opens black, or white, and nothing appears
 
 Not the loading screen — a completely black or completely white window.

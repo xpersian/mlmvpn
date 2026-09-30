@@ -205,84 +205,55 @@ function liveSocksPorts() {
     return ports;
 }
 
-/** The engine names behind those ports, for anything that has to tell the user. */
-const SOCKS_FA = { 20830: 'سایفون', 20820: 'تور', 20840: 'لنترن', 20850: 'گف', 20810: 'ماسک', 20809: 'V2Ray' };
+// ── the path: DIRECT, always ──────────────────────────────────────────────────
+//
+// The user's rule (2026-09-30): «اوپن‌وی‌پی‌ان باید مستقیم سرورهای TunnelBear و گیت‌وی را وصل کند؛
+// به هیچ عنوان نباید گزینهٔ دیگری مثل سایفون باشد — مانند اندروید». Until 1.2.5 this engine rode a
+// SOCKS «front» and started Psiphon itself when none was up, because on the raw line OpenVPN's
+// control channel was cut right after the server's certificate (openvpn-gateway-parity).
+//
+// What gets cut is the SHAPE of the first records, not the protocol — the same finding that made
+// TunnelBear work on Android (docs/ANDROID-1.2.36-TO-WINDOWS.fa.md › ۱۱.۴). So a VPN Gate relay on
+// TCP is dialled through the same loopback split relay (openvpn-profiles.SplitRelay): the relay
+// connects to the server itself, directly, and writes the first 6 KB in small uneven pieces.
+// Measured 2026-09-30 on the raw Iranian line, public-vpn-78 (219.100.37.53:443), same socket path:
+//   a plain relay (bytes copied as they come)   connection-reset, 2 of 2
+//   the split relay                              «Initialization Sequence Completed» in 5.0–5.3 s, 2 of 2
+// No second tunnel, nothing to choose, nothing started behind the user's back.
 
 /**
- * The port the handshake should ride through, or null for direct.
- *
- * 'auto' is the default because on this line the direct path is the one that fails: a front
- * that is ALREADY running costs nothing extra and turns a timeout into a connection.
+ * The profile a VPN Gate row is dialled with, and the relay that carries it (null for UDP, which a
+ * TCP relay cannot carry). The relay's own socket to the server gets a host route to the ORIGINAL
+ * gateway, or `redirect-gateway` would capture it and the tunnel would try to run inside itself.
  */
-function resolveVia(via) {
-    if (via === 'direct' || via === false) return null;
-    if (typeof via === 'number' && via > 0) return via;
-    const ports = liveSocksPorts();
-    return ports.length ? ports[0] : null;
-}
-
-function viaName(port) { return port ? (SOCKS_FA[port] || ('پورت ' + port)) : null; }
-
-/** The front the user chose in the panel, remembered across sessions by the catalogue. */
-function frontMode() {
-    try { return catalog.lists().front || 'auto'; } catch (e) { return 'auto'; }
-}
-
-/**
- * Make sure there is a front to ride through, starting one if the user has not.
- *
- * NOT a precaution — the measurement. On this line, on the same four official relays in the same
- * minute:
- *
- *   SoftEther (what «گیت‌وی MLM» speaks)   all four OK, 1.3–3.0 s
- *   OpenVPN, raw                           all four stalled at «TLS key negotiation failed»
- *   OpenVPN, through Psiphon                all four CONNECTED, 6.8–8.3 s
- *
- * The relays are alive and the profile is right; what fails is the protocol's own visibility.
- * SoftEther's SSL-VPN is literally an HTTPS POST and reads as web traffic, while OpenVPN's
- * control channel is recognisable — and gets dropped right after the server's certificate
- * arrives. So a front is not an optimisation here, it is the difference between a window that
- * works and one that times out on every server in the list.
- *
- * `mode` mirrors the panel's picker: 'auto' starts one if none is up, 'none' insists on the raw
- * path (which is the user's right, and says so when it fails), a number pins one port.
- */
-async function ensureFront(mode, onLog) {
-    const say = (m) => { pushLog(m); if (typeof onLog === 'function') try { onLog(m); } catch (e) {} };
-
-    if (mode === 'none' || mode === 'direct') return { port: null, started: false };
-
-    const already = resolveVia(typeof mode === 'number' ? mode : 'auto');
-    if (already) return { port: already, started: false, name: viaName(already) };
-    if (typeof mode === 'number' && mode > 0) {
-        // A pinned front that is not running is not something to silently replace with another.
-        return { port: null, started: false, error: 'فرانتی که انتخاب کرده‌اید روشن نیست.' };
+async function directPath(server, log = () => {}) {
+    const text = String(server.profile || '').replace(/\r\n/g, '\n');
+    const lines = text.split('\n');
+    const dir = (l) => l.trim().split(/\s+/)[0].toLowerCase();
+    const remote = lines.find((l) => dir(l) === 'remote');
+    const protoLine = lines.find((l) => dir(l) === 'proto');
+    const proto = String((protoLine && protoLine.trim().split(/\s+/)[1]) || server.proto || 'udp').toLowerCase();
+    if (!/^tcp/.test(proto)) return { profile: server.profile, relay: null };
+    const parts = remote ? remote.trim().split(/\s+/) : [];
+    let ip = server.ip && net.isIPv4(server.ip) ? server.ip : (net.isIPv4(parts[1] || '') ? parts[1] : null);
+    const port = parseInt(parts[2], 10) || server.port || 443;
+    if (!ip && parts[1]) {
+        const got = await new Promise((r) => require('dns').lookup(parts[1], { family: 4 }, (e, a) => r(e ? null : a)));
+        if (got && !/^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(got)) ip = got;
     }
-
-    // Psiphon, because it is the one that comes up fastest here — measured at 2–3 s from cold,
-    // against tens of seconds for tor. A front that takes a minute to appear turns one button
-    // into a wait nobody attributes to the right thing.
-    let ps;
-    try { ps = require('./psiphon-manager'); } catch (e) { return { port: null, started: false, error: 'سایفون در دسترس نیست.' }; }
-    if (!ps.isInstalled()) return { port: null, started: false, error: 'هستهٔ سایفون نصب نیست. از «استور» نصبش کنید.' };
-
-    // The hero reads `detail`, and raising a front can take most of a minute. Without this the
-    // panel sat on «در حال شروع» for the whole wait with nothing to attribute it to.
-    state.detail = 'روشن کردن سایفون (مسیر عبور)';
-    say('هیچ فرانتی روشن نیست — سایفون را بالا می‌آورم.');
-    try { await ps.startPsiphon({}); } catch (e) { return { port: null, started: false, error: 'سایفون بالا نیامد: ' + e.message }; }
-
-    for (let i = 0; i < 40; i++) {
-        await new Promise(r => setTimeout(r, 1000));
-        const st = ps.getStatus();
-        state.detail = 'روشن کردن سایفون — ' + (i + 1) + ' ثانیه';
-        if (st && st.connected) {
-            state.detail = 'سایفون آماده شد؛ حالا اتصال OpenVPN';
-            say('سایفون آماده است؛ اتصال OpenVPN از داخل آن می‌رود.');
-            return { port: ps.SOCKS_PORT, started: true, name: viaName(ps.SOCKS_PORT) };
-        }
-    }
-    return { port: null, started: false, error: 'سایفون در ۴۰ ثانیه وصل نشد.' };
+    if (!ip) return { profile: server.profile, relay: null };
+    const { SplitRelay } = require('./openvpn-profiles');
+    const relay = new SplitRelay([ip], port, log);
+    const rport = await relay.start();
+    const out = lines.map((l) => {
+        const d = dir(l);
+        if (d === 'proto') return 'proto tcp-client';
+        if (d === 'remote') return `remote 127.0.0.1 ${rport} tcp-client`;
+        if (d === 'explicit-exit-notify') return '';
+        return l;
+    });
+    out.push(`route ${ip} 255.255.255.255 net_gateway`);
+    return { profile: out.join('\n'), relay, ip, port };
 }
 
 /** Raw https, not fetch(): undici takes a dispatcher where SocksTlsAgent is a Node agent. */
@@ -476,16 +447,15 @@ async function verify(hosts, opts) {
     const conc = Math.max(1, Math.min(+o.concurrency || 8, 16));
     // A working handshake takes ~4.3 s here; anything still silent at 15 s is not going to
     // finish, and every second past that is paid once per dead server.
-    const budget = +o.budget || (resolveVia(o.via) ? 30000 : 15000);
+    const budget = +o.budget || 20000;
     const stopAfter = +o.stopAfter || 0;   // «just find me one that works»
-    const socks = resolveVia(o.via);
     let good = 0;
     const all = readList().servers || [];
     const want = (Array.isArray(hosts) && hosts.length ? all.filter(x => hosts.includes(x.host)) : all)
         .filter(x => x.proto === 'tcp');    // a UDP profile cannot be dialled from here at all
 
     const emit = (r) => { if (typeof o.onResult === 'function') { try { o.onResult(r); } catch (e) { /* caller */ } } };
-    if (typeof o.onBegin === 'function') o.onBegin({ total: want.length, via: socks || null, viaName: viaName(socks) });
+    if (typeof o.onBegin === 'function') o.onBegin({ total: want.length });
 
     // Pass 1 — who is even listening. Fast and wide.
     const open = [];
@@ -511,7 +481,7 @@ async function verify(hosts, opts) {
             if (o.shouldStop && o.shouldStop()) return;
             const srv = open[j++];
             if (stopAfter && good >= stopAfter) return;
-            const r = await probe(srv.host, budget, socks || 'direct');
+            const r = await probe(srv.host, budget);
             if (r.ok) good++;
             const row = {
                 host: srv.host, ok: !!r.ok, ms: r.ok ? r.ms : 0,
@@ -531,8 +501,6 @@ async function verify(hosts, opts) {
 const state = {
     adapter: null,
     adapterDriver: null,
-    via: null,
-    viaStarted: false,    // whether THIS panel brought the front up, so it can say so
     proc: null,
     host: null,
     since: 0,
@@ -548,6 +516,7 @@ const state = {
 function pushLog(line) {
     if (!line) return;
     state.log.push(String(line).slice(0, 400));
+    noteAccountFromLog(String(line));
     if (state.log.length > 400) state.log.splice(0, state.log.length - 400);
 }
 
@@ -556,23 +525,23 @@ function getStatus() {
         installed: isInstalled(),
         adapter: state.adapter || null,
         adapterDriver: state.adapterDriver || null,
-        via: state.via || null,
-        viaStarted: !!state.viaStarted,
-        viaAvailable: viaName(resolveVia('auto')) || null,
-        frontMode: frontMode(),
+        // How the bytes leave: always direct; «رلهٔ محلی» when the split relay carries a TCP server.
+        path: state.proc ? (state.relay ? 'split' : 'direct') : null,
         sweep: sweepState(),
         running: !!state.proc,
         connected: state.phase === 'connected',
         // The panel's hero reads `connecting` — and it was never sent, so the whole minute
         // between «شروع» and «وصل شد» rendered as «آمادهٔ اتصال»: a flash of the spinner while
         // the POST was in flight, then a page that looked idle while the tunnel was in fact
-        // being built, then «وصل است» out of nowhere. Bringing the front up can take 40 s on
-        // its own, so this is a long window to be silent in.
+        // being built, then «وصل است» out of nowhere.
         connecting: state.phase === 'connecting' || state.phase === 'stopping',
         error: state.phase === 'failed' ? (state.detail || '') : '',
         phase: state.phase,
         detail: state.detail,
         host: state.host,
+        label: state.label || null,
+        profileId: state.profileId || null,
+        accountId: state.accountId || null,
         localIp: state.localIp,
         since: state.since,
         bytesIn: state.bytesIn,
@@ -667,15 +636,19 @@ function writeProfile(server) {
     ensureDirs();
     const cfg = path.join(RUN_DIR, 'current.ovpn');
     const creds = path.join(RUN_DIR, 'auth.txt');
-    fs.writeFileSync(creds, 'vpn\nvpn\n');
+    // VPN Gate's relays all take vpn/vpn. A user's own profile brings its account's credentials
+    // (openvpn-profiles.js), or none at all when it authenticates by certificate alone.
+    const text = server.creds === undefined ? 'vpn\nvpn\n' : server.creds;
+    if (text) fs.writeFileSync(creds, text, { mode: 0o600 });
+    else { try { fs.unlinkSync(creds); } catch (e) { /* none */ } }
     fs.writeFileSync(cfg, server.profile);
-    return { cfg, creds };
+    return { cfg, creds: text ? creds : null };
 }
 
 function baseArgs(cfg, creds, mgmtPort, adapter) {
     return [
         '--config', cfg,
-        '--auth-user-pass', creds,
+        ...(creds ? ['--auth-user-pass', creds] : []),
         // The driver has to match the adapter we are about to open, not be assumed.
         '--windows-driver', adapter.driver,
         // Named explicitly: the machine may carry adapters from other VPN software, and picking
@@ -690,10 +663,8 @@ function baseArgs(cfg, creds, mgmtPort, adapter) {
         // None of these is an anti-censorship measure (their own README rates OpenVPN the
         // weakest protocol it ships for that, and its adapter dials plainly). They are about a
         // tunnel that stays up:
-        //   ping/ping-restart  a dead tunnel is noticed in a minute instead of hanging forever,
-        //                      which matters doubly here because a front can die under us.
-        //   mssfix             this path is a tunnel inside a tunnel when a front carries it,
-        //                      and the default MSS assumes it is not.
+        //   ping/ping-restart  a dead tunnel is noticed in a minute instead of hanging forever.
+        //   mssfix             a conservative MSS for a lossy line.
         //   route-delay        Windows needs the adapter to settle before routes point at it.
         //   auth-nocache       the profile's password is not kept in memory for re-auth.
         //   replay-window      a wider window, for a link with real jitter.
@@ -710,21 +681,36 @@ function baseArgs(cfg, creds, mgmtPort, adapter) {
 async function connect(host, opts) {
     if (!isInstalled()) throw new Error('هستهٔ OpenVPN نصب نیست. از «استور» نصبش کنید.');
     if (state.proc) throw new Error('یک اتصال OpenVPN از قبل برقرار است.');
-    const server = findServer(host);
+    const o = opts || {};
+    // A user's own profile / TunnelBear arrives ready-made (connectProfile); VPN Gate is looked up.
+    const server = o.server || findServer(host);
     if (!server) throw new Error('این سرور در فهرست نیست. فهرست را تازه کنید.');
     if (!server.profile) throw new Error('پروفایل این سرور ذخیره نشده است.');
 
-    const o = opts || {};
     // Before anything else: openvpn.exe will not create this for us, and finding that out
     // after a successful handshake is how a connection dies at the last step.
     const adapter = await ensureAdapter();
     state.adapter = adapter.name;
     state.adapterDriver = adapter.driver;
-    const { cfg, creds } = writeProfile(server);
+    // A VPN Gate row: DIRECT, through the split relay when it is TCP (see directPath). A profile
+    // (TunnelBear / the user's own) arrives with its own relay from openvpn-profiles.prepare.
+    let relay = o.relay || null;
+    let dial = server;
+    if (!o.server) {
+        const d = await directPath(server, pushLog);
+        relay = d.relay;
+        dial = Object.assign({}, server, { profile: d.profile });
+        if (d.relay) pushLog(`مستقیم از رلهٔ محلی → ${d.ip}:${d.port} (TCP)`);
+    }
+    const { cfg, creds } = writeProfile(dial);
     state.log = [];
     state.phase = 'connecting';
     state.detail = 'در حال شروع';
     state.host = host;
+    state.label = server.label || null;
+    state.profileId = o.profileId || null;
+    state.accountId = o.accountId || null;
+    state.relay = relay;
     state.localIp = '';
     state.since = 0;
     state.bytesIn = 0;
@@ -734,26 +720,6 @@ async function connect(host, opts) {
     // «فقط این برنامه» — pull nothing, so the machine's default route is untouched and only what
     // the caller routes through the adapter goes through it.
     if (o.routeNoPull) args.push('--route-nopull');
-    // The front is the tunnel's CARRIER, not just a way in — it must stay up for the whole
-    // session. `ensureFront` starts one when there is none, because on this line the raw path
-    // does not merely underperform, it never completes a handshake. See its own note.
-    const front = await ensureFront(o.via === undefined ? frontMode() : o.via, o.onLog);
-    if (front.error && o.via !== 'none' && o.via !== 'direct') {
-        state.phase = 'failed';
-        state.detail = front.error;
-        state.proc = null;
-        throw new Error(front.error);
-    }
-    const socks = front.port;
-    if (socks) {
-        args.push('--socks-proxy', '127.0.0.1', String(socks));
-        state.via = front.name || viaName(socks);
-        state.viaStarted = !!front.started;
-    } else {
-        state.via = null;
-        state.viaStarted = false;
-    }
-
     const proc = spawn(EXE, args, { cwd: CORE_DIR, windowsHide: true });
     state.proc = proc;
 
@@ -773,6 +739,12 @@ async function connect(host, opts) {
         state.since = 0;
         try { if (state.mgmt) state.mgmt.destroy(); } catch (e) { /* gone */ }
         state.mgmt = null;
+        // The TunnelBear relay lives exactly as long as the process it carries.
+        try { if (state.relay) state.relay.close(); } catch (e) { /* gone */ }
+        state.relay = null;
+        state.profileId = null;
+        state.accountId = null;
+        state.label = null;
     });
 
     // The management socket is not up the instant the process is.
@@ -780,6 +752,36 @@ async function connect(host, opts) {
     try { state.mgmt = attachManagement(MGMT_PORT); } catch (e) { /* status stays coarse */ }
 
     return { started: true, host };
+}
+
+/**
+ * Dial one of the user's own profiles or a TunnelBear server (openvpn-profiles.js). Direct, and
+ * for TunnelBear through the loopback split relay. The account is marked by what the core says: an
+ * AUTH_FAILED line marks it failed (auto-switch then skips it), CONNECTED marks it accepted.
+ */
+async function connectProfile(id, opts = {}) {
+    const prof = require('./openvpn-profiles');
+    const prep = await prof.prepare(id, { log: pushLog });
+    try {
+        const r = await connect(prep.host, Object.assign({}, opts, {
+            server: { host: prep.host, profile: prep.profile, creds: prep.creds, label: prep.place.name || prep.name },
+            relay: prep.relay, profileId: id, accountId: prep.account ? prep.account.id : null,
+        }));
+        return Object.assign(r, { profile: prep.name, place: prep.place });
+    } catch (e) {
+        try { if (prep.relay) prep.relay.close(); } catch (x) { /* gone */ }
+        throw e;
+    }
+}
+
+/** Account bookkeeping from the core's own log lines. */
+function noteAccountFromLog(line) {
+    if (!state.accountId) return;
+    try {
+        const prof = require('./openvpn-profiles');
+        if (/AUTH_FAILED/.test(line)) prof.noteAccount(state.accountId, { auth: 'failed', lastError: 'نام کاربری یا رمز را سرور نپذیرفت' });
+        else if (line === 'CONNECTED') prof.noteAccount(state.accountId, { auth: 'accepted', lastConnected: Date.now(), lastError: null });
+    } catch (e) { /* bookkeeping only */ }
 }
 
 async function disconnect() {
@@ -807,11 +809,19 @@ async function disconnect() {
  *
  * Measured on a healthy line: TCP 0.4 s, full sequence 4.3 s.
  */
-function probe(host, budgetMs, via) {
+async function probe(host, budgetMs) {
+    if (!isInstalled()) return { ok: false, err: 'هسته نصب نیست' };
+    const server = findServer(host);
+    if (!server || !server.profile) return { ok: false, err: 'سرور در فهرست نیست' };
+    // The same path a real connection takes, or a pass here would mean nothing there.
+    let d;
+    try { d = await directPath(server); } catch (e) { return { ok: false, err: e.message }; }
+    try { return await probeWith(host, d.profile, budgetMs); }
+    finally { try { if (d.relay) d.relay.close(); } catch (e) { /* gone */ } }
+}
+
+function probeWith(host, profileText, budgetMs) {
     return new Promise((resolve) => {
-        if (!isInstalled()) return resolve({ ok: false, err: 'هسته نصب نیست' });
-        const server = findServer(host);
-        if (!server || !server.profile) return resolve({ ok: false, err: 'سرور در فهرست نیست' });
 
         ensureDirs();
         // Per-probe filenames: verify() runs several of these at once, and a shared path meant
@@ -820,19 +830,17 @@ function probe(host, budgetMs, via) {
         const cfg = path.join(RUN_DIR, 'probe-' + tag + '.ovpn');
         const creds = path.join(RUN_DIR, 'probe-' + tag + '-auth.txt');
         try {
-            fs.writeFileSync(cfg, server.profile);
+            fs.writeFileSync(cfg, profileText);
             fs.writeFileSync(creds, 'vpn\nvpn\n');
         } catch (e) { return resolve({ ok: false, err: e.message }); }
 
         const t0 = Date.now();
         let done = false;
-        const socks = resolveVia(via);
         const args = [
             '--config', cfg, '--auth-user-pass', creds,
             '--dev', 'null', '--route-nopull', '--verb', '3',
             '--connect-retry-max', '1',
         ];
-        if (socks) args.push('--socks-proxy', '127.0.0.1', String(socks));
         const p = spawn(EXE, args, { cwd: CORE_DIR, windowsHide: true });
 
         const fin = (ok, err) => {
@@ -875,12 +883,12 @@ function probe(host, budgetMs, via) {
 //             whose pass means «this will connect», and it is why this panel's verdicts cannot be
 //             borrowed from the gateway's: SoftEther and OpenVPN disagree about the same relay.
 
-const sweep = { kind: null, done: 0, total: 0, startedAt: 0, stop: false, front: null };
+const sweep = { kind: null, done: 0, total: 0, startedAt: 0, stop: false };
 
 function sweepState() {
     if (!sweep.kind) return null;
     return { kind: sweep.kind, done: sweep.done, total: sweep.total, startedAt: sweep.startedAt,
-        front: sweep.front, skipped: sweep.skipped || 0 };
+        skipped: sweep.skipped || 0 };
 }
 
 function sweepRunning() { return !!sweep.kind; }
@@ -925,7 +933,6 @@ async function startSweep(kind, hosts, onStatus) {
     sweep.total = targets.length;
     sweep.startedAt = Date.now();
     sweep.stop = false;
-    sweep.front = null;
     sweep.skipped = skipped;
 
     const cur = catalog._internal.read();
@@ -957,20 +964,12 @@ async function startSweep(kind, hosts, onStatus) {
             };
             await Promise.all(Array.from({ length: Math.min(12, targets.length) }, worker));
         } else {
-            // A real handshake has to go through the same carrier a real connection would, or
-            // every row would come back «ناموفق» for a reason that has nothing to do with the
-            // relay. So the front is raised ONCE for the whole sweep.
-            const front = await ensureFront(frontMode());
-            sweep.front = front.name || (front.port ? viaName(front.port) : null);
-            if (front.error) {
-                return { ok: false, error: front.error };
-            }
-            push();
+            // The same direct path a real connection takes (probe → directPath).
             let i = 0;
             const worker = async () => {
                 while (i < targets.length && !sweep.stop) {
                     const row = targets[i++];
-                    const r = await probe(row.host, front.port ? 30000 : 15000, front.port || 'none');
+                    const r = await probe(row.host, 20000);
                     cur.probes[row.host] = r.ok
                         ? { ok: true, ms: r.ms, at: Date.now() }
                         : { ok: false, reason: r.err || 'timeout', at: Date.now() };
@@ -983,7 +982,7 @@ async function startSweep(kind, hosts, onStatus) {
         }
     } finally {
         const finished = { kind: sweep.kind, done: sweep.done, total: sweep.total, stopped: sweep.stop,
-            front: sweep.front, skipped: sweep.skipped || 0 };
+            skipped: sweep.skipped || 0 };
         sweep.kind = null;
         sweep.stop = false;
         catalog._internal.save(true);
@@ -1001,13 +1000,13 @@ async function stopAll() {
 module.exports = {
     isInstalled, isRunning, getStatus, getLogs, readTrafficCounters,
     refresh, listServers, findServer, measure, verify, tcpPing, ensureAdapter, tapctl,
-    resolveVia, viaName, liveSocksPorts, ensureFront, frontMode,
-    connect, disconnect, probe, stopAll,
+    liveSocksPorts, directPath,
+    connect, connectProfile, disconnect, probe, stopAll,
     // «فهرست من» / «آرشیو» and everything the user does to them — the catalogue's, re-exported
     // so the routes have one place to call and the panel never has to know there are two files.
     lists: catalog.lists, keep: catalog.keep, drop: catalog.drop, hide: catalog.hide,
     purge: catalog.purge, restoreHidden: catalog.restoreHidden, forget: catalog.forget,
-    select: catalog.select, setFront: catalog.setFront, stampFetched: catalog.stampFetched,
+    select: catalog.select, stampFetched: catalog.stampFetched,
     deadHosts: catalog.deadHosts, healthyHosts: catalog.healthyHosts, suggest: catalog.suggest,
     startSweep, cancelSweep, sweepRunning, sweepState,
     SOURCE_URL, CORE_DIR, EXE, MGMT_PORT,

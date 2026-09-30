@@ -64,4 +64,27 @@ function sign(sessionId, ts) {
     return crypto.createHmac('sha256', getInstallSecret()).update(`${sessionId}.${ts}`).digest('hex');
 }
 
-module.exports = { getInstallSecret, sign, SECRET_FILE };
+/**
+ * A pass for the Worker's /p/ route: which quick tunnel this installation may reach through
+ * it, for which session, until when. `<payload>.<sig>`, both base64url, the signature over the
+ * payload text exactly as it appears in the path — cloudflare-worker/gt-broker/worker.js ›
+ * THE PASSTHROUGH recomputes it from those bytes, never from a re-encoded object.
+ */
+function signPass(label, sessionId, expiresAt) {
+    const payload = Buffer.from(JSON.stringify({ h: label, s: sessionId, e: expiresAt }), 'utf8').toString('base64url');
+    const sig = crypto.createHmac('sha256', getInstallSecret()).update(payload).digest('base64url');
+    return `${payload}.${sig}`;
+}
+
+/**
+ * A pass for one of the STABLE tunnels (gt-slots.js) instead of a quick tunnel: the Worker
+ * reaches slot `a`, `b` or `c` through its Workers VPC binding. Same signature, same expiry rule.
+ */
+function signSlotPass(slot, sessionId, expiresAt) {
+    if (!['a', 'b', 'c'].includes(slot)) throw new Error('bad slot');
+    const payload = Buffer.from(JSON.stringify({ k: slot, s: sessionId, e: expiresAt }), 'utf8').toString('base64url');
+    const sig = crypto.createHmac('sha256', getInstallSecret()).update(payload).digest('base64url');
+    return `${payload}.${sig}`;
+}
+
+module.exports = { getInstallSecret, sign, signPass, signSlotPass, SECRET_FILE };

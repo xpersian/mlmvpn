@@ -283,6 +283,10 @@
     // A split page (components/openvpn.js). Its own engine: openvpn.exe from core/openvpn,
     // dialling the VPN Gate pool through the auto-ovpn mirror, which refreshes every 5 minutes.
     openvpnKind(),
+    // «میدان کانفیگ» (components/arena.js): the cloud panels race on real measurements — the
+    // Android 1.2.36 arena. A full-bleed dark page of its own scenes, not the split kit.
+    panel('ls-arena', { id: 'arena', title: 'میدان کانفیگ', short: 'میدان', icon: 'g-trophy', tint: 'yellow', flush: true, size: [1000, 720], min: [760, 520], legacy: 'arena',
+      onShow: function (w) { panel('ls-arena').onShow(w); if (typeof window.arenaRefresh === 'function') window.arenaRefresh(); } }),
     panel('ls-gst', { id: 'gst', title: 'تونل گوگل‌اسکریپت', short: 'گوگل‌اسکریپت', icon: 'g-google', art: 'white', flush: true, chrome: 'split', size: [900, 700], min: [700, 470], legacy: 'gst',
       engine: probe(function () { return gstState && gstState.running === true; }) }),
     panel('ls-github-tunnel', { id: 'github', title: 'گیت‌هاب تانل', short: 'گیت‌هاب', icon: 'g-github', art: 'graphite', flush: true, chrome: 'split', size: [900, 700], min: [700, 470], legacy: 'github-tunnel',
@@ -326,11 +330,13 @@
   ];
 
   var DOCK = ['scanner', 'v2ray', 'store', 'settings', 'cloud'];
-  var HOME = ['warp', 'masque', 'wireguard', 'warp_on_warp', 'psiphon', 'tor', 'lantern', 'geph', 'gateway', 'openvpn', 'quick', 'sni', 'sanction', 'iran', 'fronting', 'free', 'gst', 'github', 'vodi', 'game', 'store', 'monitor', 'console', 'guide', 'changelog', '@tools'];
+  var HOME = ['warp', 'masque', 'wireguard', 'warp_on_warp', 'psiphon', 'tor', 'lantern', 'geph', 'gateway', 'openvpn', 'quick', 'sni', 'sanction', 'iran', 'fronting', 'free', 'gst', 'github', 'vodi', 'arena', 'game', 'store', 'console', 'changelog', '@tools'];
   // Folders are the user's ('mv-folders'): made by dropping one icon on another, renamed, emptied
   // and deleted on the desktop. «ابزارها» is only the one they start with — it can be renamed,
   // emptied and deleted like any other.
-  var DEFAULT_FOLDERS = { tools: { title: 'ابزارها', apps: ['netdiag', 'dnsclean', 'speed', 'syscheck', 'fixedip'] } };
+  // Usage and the tutorials joined «ابزارها» in 1.2.5 (Android 1.2.36 › ۵); desktop.js moves them
+  // there ONCE in a saved layout too, so an icon the user takes back out stays out.
+  var DEFAULT_FOLDERS = { tools: { title: 'ابزارها', apps: ['netdiag', 'dnsclean', 'speed', 'syscheck', 'fixedip', 'monitor', 'guide'] } };
   function cloneFolders(f) { return JSON.parse(JSON.stringify(f)); }
   function readFolders() {
     try {

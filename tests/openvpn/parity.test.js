@@ -7,8 +7,8 @@
 // Each row names one capability, the gateway's proof of it, and what must exist on the OpenVPN
 // side for it to be real. Where the two genuinely differ the row says why, because «the same
 // features» does not mean «the same engine»: the gateway drives SoftEther's own client and has a
-// UDP-acceleration switch; this one drives openvpn.exe and has a front picker, for a reason that
-// was measured rather than assumed (see the manager's ensureFront).
+// UDP-acceleration switch; this one drives openvpn.exe DIRECTLY — no front, no picker (the user's
+// rule, 2026-09-30) — through a local split relay for TCP relays (the manager's directPath).
 
 const assert = require('assert');
 const fs = require('fs');
@@ -120,8 +120,9 @@ parity('the sweep reports progress and can be stopped',
     [[manager, /function cancelSweep\(\)/], [manager, /function sweepState\(\)/],
     [server, /\/api\/openvpn\/test\/cancel/], [panel, /data-ov-act="stop"/], [panel, /ov-sweep/]]);
 
-t('…and a real-test sweep raises the front ONCE for the whole run, not per relay',
-    /const front = await ensureFront\(frontMode\(\)\);/.test(manager));
+t('…and a real-test sweep dials each relay the way a connection would: direct, through the relay',
+    /const r = await probe\(row\.host, 20000\);/.test(manager) && /async function probe\(host, budgetMs\)/.test(manager)
+    && /await directPath\(server\)/.test(manager));
 
 // ── 3. finding a relay in a list of hundreds ─────────────────────────────────────────────────
 
@@ -166,8 +167,8 @@ parity('«راهنمای سرورها» — what the two lists are, what the two
     [[gwPanel, /function renderGuide\(\)/], [gwPanel, /دو فهرست/], [gwPanel, /دو تست/]],
     [[panel, /function renderGuide\(\)/], [panel, /دو فهرست/], [panel, /دو تست/]]);
 
-t('…and it also explains the front, which this engine cannot work without',
-    /مسیر عبور/.test(panel) && /دست‌دادن/.test(panel));
+t('…and it also explains the direct path and its local relay, with the measurement',
+    /اتصال مستقیم — و چرا یک رلهٔ محلی/.test(panel) && /دست‌دادن/.test(panel));
 
 // ── 6. the list's own state ──────────────────────────────────────────────────────────────────
 
@@ -223,26 +224,26 @@ parity('switching relay while connected MOVES the tunnel',
 
 parity('the session card names the path the traffic is really on',
     [[gwPanel, /مسیر واقعی داده/]],
-    [[panel, /مسیر واقعی داده/]]);
+    [[panel, /<span>مسیر داده<\/span>/], [panel, /s\.path === 'split'/]]);
 
 // ── 8. what is genuinely this engine's own ───────────────────────────────────────────────────
 //
-// The gateway has a UDP switch here. This engine has a front, and it is not a preference: raw,
-// OpenVPN never completes a handshake on this line. Both facts were measured on the same four
-// relays in the same minute — the note in ensureFront carries the numbers.
+// The gateway has a UDP switch here. This engine is DIRECT, and that is the user's rule: «به هیچ
+// عنوان نباید گزینهٔ دیگری مثل سایفون باشد». What made the raw path work is measured, not assumed:
+// on the raw line a plain relay was reset 2 of 2 times, the split relay connected in ~5 s 2 of 2.
 
-t('the front is a real step in connect, not a hint in the copy',
-    /async function ensureFront\(/.test(manager) && /await ensureFront\(/.test(manager));
-t('…and it is remembered per user, like every other choice about their own machine',
-    /function setFront\(v\)/.test(catalog) && /front: 'auto'/.test(catalog));
-t('…and the panel offers it as a picker, with every live front as its own row',
-    /function frontOptions\(\)/.test(panel) && /data-ov-front=/.test(panel));
-t('…and «مستقیم» stays available, because a user on an unfiltered line should not pay for a front',
-    /بدون فرانت \(مستقیم\)/.test(panel));
-t('…and changing it mid-session is refused rather than silently ignored',
-    /if \(openvpn\.isRunning\(\)\)/.test(server) && /اول اتصال را قطع کنید/.test(server));
-t('…and the panel reports the front that is REALLY carrying the bytes, not the one chosen',
-    /function frontWords\(s\)/.test(panel) && /s\.via/.test(panel));
+t('connect is direct: no front, no SOCKS carrier, no Psiphon started by this engine',
+    !/ensureFront|resolveVia|frontMode|--socks-proxy|startPsiphon/.test(manager));
+t('…a VPN Gate TCP relay is dialled through the loopback split relay, with a bypass route for its socket',
+    /async function directPath\(/.test(manager) && /new SplitRelay\(\[ip\], port/.test(manager)
+    && /route \$\{ip\} 255\.255\.255\.255 net_gateway/.test(manager) && /remote 127\.0\.0\.1 \$\{rport\} tcp-client/.test(manager));
+t('…the relay lives exactly as long as the process it carries',
+    /state\.relay = relay;/.test(manager) && /if \(state\.relay\) state\.relay\.close\(\)/.test(manager));
+t('…the panel offers no path to choose, and never mentions starting another engine',
+    !/data-ov-front=|function frontOptions|function setFront|\/api\/openvpn\/front/.test(panel)
+    && !/سایفون خودش بالا می‌آید/.test(panel));
+t('…and the server has no front route and ignores any «via» a page sends',
+    !/\/api\/openvpn\/front/.test(server.replace(/\/\/.*$/gm, '')) && !/via: \(req\.body && req\.body\.via\)/.test(server));
 
 // The profile the gateway's archive cannot supply.
 t('a profile is built from an archive row, because the shared archive carries none',

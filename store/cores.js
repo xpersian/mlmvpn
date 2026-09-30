@@ -30,6 +30,7 @@ const { SHIPPED } = require('./shipped');
 const versions = require('./versions');
 const trust = require('./trust');
 const netio = require('./net');
+const authenticode = require('./authenticode');
 
 const TAR = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
 const MSIEXEC = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'msiexec.exe');
@@ -186,7 +187,9 @@ async function probeFile(exe, probe) {
     if (probeCache.has(key)) return probeCache.get(key);
     const r = await run(exe, probe.args, { timeout: 15000, cwd: path.dirname(exe) });
     const m = (r.out + '\n' + r.err).match(probe.re);
-    const v = m ? m[1] : null;
+    // Every group, joined: one group is the version as it stands; SoftEther's vpncmd prints
+    // «Version 4.44 Build 9807», which only means 4.44.9807 once its two halves are put together.
+    const v = m ? m.slice(1).filter((g) => g != null && g !== '').join('.') || null : null;
     probeCache.set(key, v);
     return v;
 }
@@ -333,6 +336,13 @@ async function extractArtifact(artifact, file, staging, scratch) {
     } else if (fmt === 'msi') {
         // Administrative extraction: files only. No service, no driver, nothing registered.
         r = await runMsiAdmin(file, scratch);
+    } else if (fmt === 'sfx') {
+        // SoftEther's Windows client exists only as its own installer. store/sfx.js reads the
+        // files straight out of the PE resource table, so nothing is executed — running a setup
+        // program is exactly what this store must never do. The signature that covers the image
+        // covers those resources too, and it was verified before the download was accepted.
+        require('./sfx').extract(file, scratch);
+        r = { code: 0 };
     } else {
         throw new Error('قالب بسته شناخته نشد: ' + fmt);
     }
@@ -479,8 +489,18 @@ async function install(item, target, { onPhase, onProgress, onRoute, signal, log
         throw fail('no-target', 'برای این هسته هنوز نسخهٔ تأییدشده‌ای منتشر نشده است.');
     }
     for (const a of target.artifacts) {
-        if (!trust.isSha256(a.sha256) || !Array.isArray(a.urls) || !a.urls.length) {
-            throw fail('no-digest', 'نسخهٔ ' + target.version + ' هش معتبر ندارد — نصب نمی‌شود.');
+        if (!Array.isArray(a.urls) || !a.urls.length) {
+            throw fail('no-digest', 'نسخهٔ ' + target.version + ' نشانی دانلود ندارد — نصب نمی‌شود.');
+        }
+        // A digest is the usual anchor. `signedBy` is the other one, and it is not a weaker
+        // substitute: SoftEther publishes no digest for their Windows client (the upload predates
+        // GitHub computing them), but the file carries their own Authenticode signature, and the
+        // files inside it are PE resources of that same signed image. One check covers all of
+        // them, and it says who BUILT the bytes rather than who received them.
+        //
+        // What is refused is an artifact with neither. That has no anchor at all.
+        if (!trust.isSha256(a.sha256) && !a.signedBy) {
+            throw fail('no-digest', 'نسخهٔ ' + target.version + ' نه هش معتبر دارد و نه امضای شناخته‌شده — نصب نمی‌شود.');
         }
     }
     const now = await state(item);
@@ -498,16 +518,35 @@ async function install(item, target, { onPhase, onProgress, onRoute, signal, log
     let doneBytes = 0;
     for (const a of target.artifacts) {
         say(onPhase, 'download', a.name);
-        const dest = path.join(downloadsDir(), a.sha256);
         const base = doneBytes;
-        const got = await netio.download({
-            urls: a.urls, sha256: a.sha256, size: a.size || 0, dest, signal,
+        const common = {
+            urls: a.urls, signal,
             onRoute: (label) => say(onRoute, label),
             onProgress: (n, t) => { if (onProgress) onProgress(base + n, totalBytes || t); },
-        });
+        };
+        let got;
+        if (trust.isSha256(a.sha256)) {
+            got = await netio.download(Object.assign({ sha256: a.sha256, size: a.size || 0, dest: path.join(downloadsDir(), a.sha256) }, common));
+            // A digest says the bytes are what the release page holds; a signature, where the
+            // catalogue asks for one, says who built them. When both exist, both are required.
+            if (a.signedBy) {
+                try { await authenticode.verify(got.file, a.signedBy); } catch (e) { throw fail('signature', e.message); }
+            }
+            say(log, a.name + ' دریافت و با هش تأیید شد (' + got.route + ')');
+        } else {
+            // No digest to name the file by, so it is named for the artifact; downloadSigned
+            // re-checks a copy found there instead of trusting it.
+            const dest = path.join(downloadsDir(), 'signed-' + String(a.name).replace(/[^0-9A-Za-z._\-]/g, '_'));
+            try {
+                got = await netio.downloadSigned(Object.assign({ signedBy: a.signedBy, dest }, common));
+            } catch (e) {
+                if (e && e.code === 'bad-signature') throw fail('signature', e.message);
+                throw e;
+            }
+            say(log, a.name + ' دریافت شد و امضای دیجیتال ' + a.signedBy + ' رویش تأیید شد (' + got.route + ')');
+        }
         doneBytes += a.size || got.bytes;
         fetched.push({ artifact: a, file: got.file, route: got.route });
-        say(log, a.name + ' دریافت و با هش تأیید شد (' + got.route + ')');
     }
 
     // 3. extract
@@ -520,6 +559,19 @@ async function install(item, target, { onPhase, onProgress, onRoute, signal, log
     await fsp.mkdir(staging, { recursive: true });
     try {
         for (const f of fetched) await extractArtifact(f.artifact, f.file, staging, scratch);
+        // The installer's signature covers the resources these came out of, so this is the second
+        // look, not the first: every executable that will run — here as a SYSTEM service — must
+        // itself carry the publisher's valid signature. It also catches an unpacker that put the
+        // wrong resource under the right name, which no signature on the outer file could.
+        for (const f of fetched) {
+            if (!f.artifact.signedBy) continue;
+            for (const rel of Object.values(f.artifact.extract || {})) {
+                if (!/\.exe$/i.test(rel)) continue;
+                try { await authenticode.verify(path.join(staging, rel), f.artifact.signedBy); } catch (e) {
+                    throw fail('signature', rel + ': ' + e.message);
+                }
+            }
+        }
         for (const c of item.companions || []) {
             const src = path.join(bundledCoreDir(), c.from);
             const dest = path.join(staging, c.rel);

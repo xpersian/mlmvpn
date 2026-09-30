@@ -40,6 +40,12 @@ module.exports = function registerVodiRoutes(app, { broadcastLog } = {}) {
     // ── static metadata ─────────────────────────────────────────────────────────
     app.get('/api/vodi/regions', handle(async () => ({ ok: true, regions: deployer.REGIONS })));
 
+    // Which panels can be put on Railway (VodiWalker, RVG) — the wizard offers these.
+    app.get('/api/vodi/panels', handle(async () => ({
+        ok: true,
+        panels: Object.values(deployer.PANELS).map((p) => ({ id: p.id, title: p.title, repo: p.repo, usesUsername: p.usesUsername })),
+    })));
+
     // Railway accounts the user has saved (token never returned to the UI).
     app.get('/api/vodi/railway/accounts', handle(async () => ({
         ok: true,
@@ -105,14 +111,15 @@ module.exports = function registerVodiRoutes(app, { broadcastLog } = {}) {
             id: g.id, name: g.name, region: g.region, domain: g.domain,
             adminUsername: g.adminUsername || store.DEFAULT_ADMIN_USERNAME,
             adminPassword: g.adminPassword, source: g.source || '', createdAt: g.createdAt,
+            panel: g.panel || 'vodi', panelTitle: deployer.panelOf(g).title,
         })),
     })));
 
     app.post('/api/vodi/deploy', handle(async (req) => {
-        const { accountId, name, region, adminUsername, adminPassword } = req.body || {};
+        const { accountId, name, region, adminUsername, adminPassword, panel } = req.body || {};
         if (!accountId) throw new Error('حساب Railway انتخاب نشده است.');
         const result = await deployer.deployGateway({
-            accountId, name, region, adminUsername, adminPassword, onLog: emitLog,
+            accountId, name, region, adminUsername, adminPassword, panel, onLog: emitLog,
         });
         return { ok: true, ...result };
     }));
@@ -172,6 +179,9 @@ module.exports = function registerVodiRoutes(app, { broadcastLog } = {}) {
     // server build supports instead of a list hard-coded in the renderer.
     app.get('/api/vodi/gateways/:id/protocols', handle(async (req) => {
         const gw = gwOr404(req.params.id);
+        // RVG has no /api/protocols; its table is fixed in its source (vodi-deployer-railway.js).
+        const fixed = deployer.panelOf(gw).protocols;
+        if (fixed) return { ok: true, protocols: fixed };
         return { ok: true, protocols: await deployer.vodiApi(gw, 'GET', '/api/protocols') };
     }));
 
@@ -181,12 +191,17 @@ module.exports = function registerVodiRoutes(app, { broadcastLog } = {}) {
     // here, and the alternative is opening Railway's dashboard in a browser.
     app.get('/api/vodi/gateways/:id/telemetry', handle(async (req) => {
         const gw = gwOr404(req.params.id);
-        return { ok: true, telemetry: await deployer.vodiApi(gw, 'GET', '/api/telemetry') };
+        // RVG reports the same kind of figures on /api/system.
+        const ep = (gw.panel === 'rvg') ? '/api/system' : '/api/telemetry';
+        return { ok: true, telemetry: await deployer.vodiApi(gw, 'GET', ep) };
     }));
 
     // Zero one config's used traffic without touching its limits or its link.
     app.post('/api/vodi/gateways/:id/users/:uid/reset-usage', handle(async (req) => {
         const gw = gwOr404(req.params.id);
+        if (gw.panel === 'rvg') {
+            return { ok: true, result: await deployer.vodiApi(gw, 'PATCH', `/api/links/${req.params.uid}`, { reset_usage: true }) };
+        }
         return { ok: true, result: await deployer.vodiApi(gw, 'POST', `/api/links/${req.params.uid}/reset-usage`) };
     }));
 
@@ -194,6 +209,7 @@ module.exports = function registerVodiRoutes(app, { broadcastLog } = {}) {
     // shared my link" button: the old uuid stops working the moment this returns.
     app.post('/api/vodi/gateways/:id/users/:uid/regenerate', handle(async (req) => {
         const gw = gwOr404(req.params.id);
+        if (gw.panel === 'rvg') throw new Error('پنل RVG ساختن شناسهٔ تازه برای یک کانفیگ را ندارد — کانفیگ را حذف و یک کانفیگ تازه بسازید.');
         const data = await deployer.vodiApi(gw, 'POST', `/api/links/${req.params.uid}/regenerate`, req.body || {});
         return { ok: true, user: data };
     }));

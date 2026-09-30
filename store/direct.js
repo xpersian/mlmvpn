@@ -16,7 +16,10 @@
 //   1. the release list comes from the project's own repo, fixed in the catalogue — never from
 //      anything a page said (store/upstream.js, which reads releases.atom, not the metered API);
 //   2. the asset's SHA-256 is GITHUB's, computed at upload and read off the release page
-//      (store/github.js), and store/net.js refuses a download whose hash does not match it;
+//      (store/github.js), and store/net.js refuses a download whose hash does not match it —
+//      or, for a publisher whose upload predates GitHub's digests but who SIGNS the file
+//      (SoftEther, `direct.signedBy`), the publisher's own Authenticode signature, checked
+//      before the file is kept (net.js › downloadSigned, store/authenticode.js);
 //   3. the binary is then run and must report a version (store/cores.js › validate), and the new
 //      version directory is ACL-locked like every other install;
 //   4. one click rolls back to the version that was working.
@@ -84,11 +87,28 @@ function assetName(spec, version, tag) {
  */
 async function resolve(item, rel, opts = {}) {
     const spec = item.upstream.direct;
-    const name = assetName(spec, rel.version, rel.tag);
     const found = await github.assets(item.upstream.repo, rel.tag, opts);
+    let name;
+    if (spec.assetRe) {
+        // For a project whose file names carry something the tag does not — SoftEther's has the
+        // BUILD date in it — the name is matched against what the release actually lists, never
+        // predicted. Exactly one match, or nothing: two would mean the pattern is wrong.
+        const re = new RegExp(spec.assetRe);
+        const hits = Object.keys(found).filter((n) => re.test(n));
+        if (hits.length !== 1) {
+            throw new Error(hits.length
+                ? 'در انتشار ' + rel.tag + ' بیش از یک فایل با الگوی نصب پیدا شد (' + hits.join('، ') + ')'
+                : 'در انتشار ' + rel.tag + ' فایلی برای ویندوز پیدا نشد');
+        }
+        name = hits[0];
+    } else {
+        name = assetName(spec, rel.version, rel.tag);
+        if (!found[name]) throw new Error('فایل «' + name + '» در انتشار ' + rel.tag + ' نیست');
+    }
     const hit = found[name];
-    if (!hit) throw new Error('فایل «' + name + '» در انتشار ' + rel.tag + ' نیست');
-    if (!hit.sha256) throw new Error('گیت‌هاب برای «' + name + '» هشی منتشر نکرده است');
+    // No digest is an anchor missing — acceptable only where the catalogue names the publisher
+    // whose signature must be on the file instead (store/authenticode.js).
+    if (!hit.sha256 && !spec.signedBy) throw new Error('گیت‌هاب برای «' + name + '» هشی منتشر نکرده است');
     return {
         version: rel.version,
         released: (rel.at || '').slice(0, 10),
@@ -99,7 +119,9 @@ async function resolve(item, rel, opts = {}) {
             name,
             format: spec.format || 'zip',
             extract: spec.extract,
-            sha256: hit.sha256,
+            sha256: hit.sha256 || null,
+            // Carried even when GitHub has a digest: the installer then needs both to pass.
+            signedBy: spec.signedBy || undefined,
             urls: [hit.url],
             size: 0,
         }],

@@ -38,11 +38,20 @@ const accounts = require('./gt-accounts');
 const { SESSION_LIFETIME_MINUTES } = require('./gt-workflow-template');
 
 // GitHub's published billing multipliers. A minute on a Windows runner costs two of the
-// account's included minutes; macOS costs ten. Our workflow is windows-latest, so a
-// session's cost is roughly double its wall-clock length — which is exactly why one
-// account runs out so much faster than the raw minute figure suggests.
+// account's included minutes; macOS costs ten. v1's workflow was windows-latest, so its
+// session cost double its wall-clock length; v2 runs on ubuntu-latest at 1× — the same free
+// allowance buys twice the sessions.
 const OS_MULTIPLIER = { UBUNTU: 1, LINUX: 1, WINDOWS: 2, MACOS: 10 };
-const RUNNER_OS = 'WINDOWS';
+const RUNNER_OS = 'UBUNTU';
+
+// Each run is priced by the runner it actually ran on, read off its workflow file: the repo
+// holds v1 (Windows) and v2 (ubuntu) runs side by side for as long as both exist. Anything
+// unrecognised is priced as Windows — overestimating spend is the safe direction.
+function runMultiplier(run) {
+    const where = `${(run && run.path) || ''} ${(run && run.name) || ''}`;
+    if (/mlmvpn-tunnel-v2|mlmvpn-spike/.test(where)) return OS_MULTIPLIER.UBUNTU;
+    return OS_MULTIPLIER.WINDOWS;
+}
 
 // What one full session costs, in included-minutes. Used for ranking accounts by how many
 // more sessions they could take — never as an eligibility gate, because GitHub itself
@@ -138,7 +147,7 @@ async function estimate(account, token) {
         const started = Date.parse(run.run_started_at || run.created_at) || 0;
         const ended = run.status === 'completed' ? (Date.parse(run.updated_at) || 0) : Date.now();
         const wallMs = run.durationMs != null ? run.durationMs : Math.max(0, ended - started);
-        minutes += (wallMs / 60000) * OS_MULTIPLIER[RUNNER_OS];
+        minutes += (wallMs / 60000) * runMultiplier(run);
         counted++;
     }
 
@@ -158,7 +167,7 @@ async function estimate(account, token) {
 
 /** Runs in this repo started at or after `since`, newest first. */
 async function listRunsSince(token, repository, since) {
-    const data = await github.listWorkflowRuns(token, repository, { perPage: 100 });
+    const data = await github.listWorkflowRuns(token, repository, { perPage: 100, allWorkflows: true });
     const runs = [];
     for (const r of data.runs || []) {
         const t = Date.parse(r.run_started_at || r.created_at) || 0;
@@ -236,6 +245,6 @@ function sessionsRemaining(quota) {
 
 module.exports = {
     refresh, isExhausted, sessionsRemaining, currentCycle, cycleStartMs,
-    OS_MULTIPLIER, RUNNER_OS, SESSION_COST_MINUTES, QUOTA_TTL_MS,
+    OS_MULTIPLIER, RUNNER_OS, SESSION_COST_MINUTES, QUOTA_TTL_MS, runMultiplier,
     _measure: measure, _estimate: estimate,
 };
